@@ -1,0 +1,52 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0)  buffer Weights  { float W[];  };
+layout(set = 0, binding = 1)  buffer Biases   { float B[];  };
+layout(set = 0, binding = 7)  buffer dWeights { float dW[]; };
+layout(set = 0, binding = 8)  buffer dBiases  { float dB[]; };
+layout(set = 0, binding = 9)  buffer mWeights { float mW[]; };
+layout(set = 0, binding = 10) buffer vWeights { float vW[]; };
+layout(set = 0, binding = 11) buffer mBiases  { float mB[]; };
+layout(set = 0, binding = 12) buffer vBiases  { float vB[]; };
+
+struct AdamParams
+{
+    float beta1,
+          beta2,
+          epsilon,
+          learningRate;
+};
+
+layout(push_constant) uniform PushConstants {
+    AdamParams adamParams;
+    uint t;
+    uint size;
+    uint phase;
+} push;
+
+void main()
+{
+    uint id = gl_GlobalInvocationID.x;
+    if(id >= push.size) return;
+
+    AdamParams adamParams = push.adamParams;
+
+    if(push.phase == 0)
+    {
+        mW[id] = mix(dW[id], mW[id], adamParams.beta1);
+        vW[id] = mix(dW[id] * dW[id], vW[id], adamParams.beta2);
+        float mW_hat = mW[id] / (1 - pow(adamParams.beta1, float(push.t)));
+        float vW_hat = vW[id] / (1 - pow(adamParams.beta2, float(push.t)));
+        W[id] -= adamParams.learningRate * mW_hat / (sqrt(vW_hat) + adamParams.epsilon);
+    }
+    else
+    {
+        mB[id] = mix(dB[id], mB[id], adamParams.beta1);
+        vB[id] = mix(dB[id] * dB[id], vB[id], adamParams.beta2);
+        float mB_hat = mB[id] / (1 - pow(adamParams.beta1, float(push.t)));
+        float vB_hat = vB[id] / (1 - pow(adamParams.beta2, float(push.t)));
+        B[id] -= adamParams.learningRate * mB_hat / (sqrt(vB_hat) + adamParams.epsilon);
+    }
+}

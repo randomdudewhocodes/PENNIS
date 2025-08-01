@@ -1,0 +1,63 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0)  readonly  buffer Weights  { float W[]; };
+layout(set = 0, binding = 2)  readonly  buffer Inputs  { float X[]; };
+layout(set = 0, binding = 3)  readonly  buffer PreActs  { float Z[]; };
+layout(set = 0, binding = 4)  readonly  buffer Acts     { float A[]; };
+layout(set = 0, binding = 5)  writeonly buffer GradIn   { float dZ[]; };
+layout(set = 0, binding = 6)  readonly  buffer GradOut  { float dA[]; };
+layout(set = 0, binding = 7)  writeonly buffer dWeights { float dW[]; };
+layout(set = 0, binding = 8)  writeonly buffer dBiases  { float dB[]; };
+layout(set = 0, binding = 13) readonly  buffer Targets  { float T[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint inSize;
+    uint outSize;
+    uint actType;
+    uint isOutput;
+    uint phase;
+} push;
+
+float dActivate(float x)
+{
+    switch (push.actType)
+    {
+        case 1: return x > 0 ? 1 : 0;
+        case 2:
+            float s = 1 / (1 + exp(-x));
+            return s * (1 - s);
+        case 3:
+            float t = tanh(x);
+            return 1 - t * t;
+        default: return 1;
+    }
+}
+
+void main()
+{
+    uint id = gl_GlobalInvocationID.x;
+
+    if(push.phase == 0)
+    {
+        if(id >= push.outSize) return;
+        float gradLoss = push.isOutput == 0 ? dA[id] : 2 * (A[id] - T[id]);
+    
+        float localGrad = gradLoss * dActivate(Z[id]);
+        dB[id] = localGrad;
+
+        for (uint i = 0; i < push.inSize; i++)
+            dW[id * push.inSize + i] = localGrad * X[i];
+    }
+    else
+    {
+        if(id >= push.inSize) return;
+
+        float sum = 0;
+        for (uint i = 0; i < push.outSize; i++)
+            sum += W[i * push.inSize + id] * dA[i];
+        
+        dZ[id] = sum * dActivate(Z[id]);
+    }
+}

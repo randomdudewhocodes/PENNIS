@@ -3,14 +3,15 @@
 layout(local_size_x = 256) in;
 
 layout(set = 0, binding = 0)  readonly  buffer Weights  { float W[]; };
-layout(set = 0, binding = 2)  readonly  buffer Inputs  { float X[]; };
+layout(set = 0, binding = 2)  readonly  buffer Inputs   { float X[]; };
 layout(set = 0, binding = 3)  readonly  buffer PreActs  { float Z[]; };
 layout(set = 0, binding = 4)  readonly  buffer Acts     { float A[]; };
-layout(set = 0, binding = 5)  writeonly buffer GradIn   { float dZ[]; };
-layout(set = 0, binding = 6)  readonly  buffer GradOut  { float dA[]; };
-layout(set = 0, binding = 7)  writeonly buffer dWeights { float dW[]; };
-layout(set = 0, binding = 8)  writeonly buffer dBiases  { float dB[]; };
-layout(set = 0, binding = 13) readonly  buffer Targets  { float T[]; };
+layout(set = 0, binding = 5)  writeonly buffer dInput   { float dX[]; };
+layout(set = 0, binding = 6)            buffer delta    { float dZ[]; };
+layout(set = 0, binding = 7)  readonly  buffer dOutput  { float dA[]; };
+layout(set = 0, binding = 8)  writeonly buffer dWeights { float dW[]; };
+layout(set = 0, binding = 9)  writeonly buffer dBiases  { float dB[]; };
+layout(set = 0, binding = 14) readonly  buffer Targets  { float T[]; };
 
 layout(push_constant) uniform PushConstants {
     uint inSize;
@@ -42,22 +43,22 @@ void main()
     if(push.phase == 0)
     {
         if(id >= push.outSize) return;
-        float gradLoss = push.isOutput == 0 ? dA[id] : 2 * (A[id] - T[id]);
-    
-        float localGrad = gradLoss * dActivate(Z[id]);
-        dB[id] = localGrad;
+
+        dZ[id] = push.isOutput == 0 ? dA[id] : 2 * (A[id] - T[id]) / push.outSize;
+        dZ[id] *= dActivate(Z[id]);
+
+        dB[id] = dZ[id];
 
         for (uint i = 0; i < push.inSize; i++)
-            dW[id * push.inSize + i] = localGrad * X[i];
+            dW[id * push.inSize + i] = dZ[id] * X[i];
     }
     else
     {
         if(id >= push.inSize) return;
 
-        float sum = 0;
+        dX[id] = 0;
+
         for (uint i = 0; i < push.outSize; i++)
-            sum += W[i * push.inSize + id] * dA[i];
-        
-        dZ[id] = sum * dActivate(Z[id]);
+            dX[id] += W[i * push.inSize + id] * dZ[i];
     }
 }

@@ -46,8 +46,8 @@ struct AdamParams
 
 struct Layer
 {
-    Buffer weights, biases, input, preActs, acts,
-           gradIn, gradOut, dWeights, dBiases,
+    Buffer weights, biases, input, preActs, output,
+           dWeights, dBiases, dInput, delta, dOutput,
            mWeights, vWeights, mBiases, vBiases;
     
     uint32_t inSize, outSize, actType;
@@ -76,7 +76,9 @@ private:
     VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
     VkDevice device;
     VkQueue computeQueue;
-    VkDescriptorSetLayout computeDescriptorSetLayout;
+    VkDescriptorSetLayout forwardDescriptorSetLayout;
+    VkDescriptorSetLayout backpropDescriptorSetLayout;
+    VkDescriptorSetLayout adamDescriptorSetLayout;
     VkPipelineLayout forwardPipelineLayout;
     VkPipeline forwardPipeline;
     VkPipelineLayout backpropPipelineLayout;
@@ -85,7 +87,9 @@ private:
     VkPipeline adamPipeline;
     VkCommandPool commandPool;
     VkDescriptorPool descriptorPool;
-    std::vector<VkDescriptorSet> computeDescriptorSets;
+    std::vector<VkDescriptorSet> forwardDescriptorSets;
+    std::vector<VkDescriptorSet> backpropDescriptorSets;
+    std::vector<VkDescriptorSet> adamDescriptorSets;
     VkCommandBuffer computeCommandBuffer;
     VkFence fence;
     

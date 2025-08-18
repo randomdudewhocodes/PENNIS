@@ -47,7 +47,7 @@ function(add_shaders TARGET_NAME)
 endfunction()
 
 # Compile shader files
-add_shaders(shaders shaders/forward.comp shaders/backprop.comp shaders/adam.comp) 
+add_shaders(shaders shaders/forward.comp shaders/backprop.comp shaders/reduce.comp shaders/adam.comp) 
 
 # Create executable
 add_executable(pennis

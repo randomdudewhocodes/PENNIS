@@ -10,7 +10,7 @@ int main()
         std::vector<uint32_t> actTypes = {Tanh, Tanh, Tanh, Tanh};
         AdamParams adamParams = {0.9f, 0.999f, 1e-8f, 0.01f};
 
-        PENNIS pennis(256, 50, layerSizes, actTypes, adamParams);
+        PENNIS pennis(50, layerSizes, actTypes, adamParams);
         
         const int epochs = 1000;
 
@@ -31,9 +31,7 @@ int main()
 
         for(int epoch = 0; epoch < epochs; epoch++)
         {
-            pennis.runForwardBatch();
-            pennis.runBackprop();
-            pennis.applyAdam();
+            pennis.train();
 
             //if(epoch % 100 == 0 || epoch == epochs - 1)
             {

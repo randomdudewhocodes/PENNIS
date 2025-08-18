@@ -1,0 +1,24 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly  buffer GradBatch { float gradBatch[]; };
+layout(set = 0, binding = 1) writeonly buffer Grad      { float grad[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint size;
+    uint batchSize;
+} push;
+
+void main()
+{
+    uint id = gl_GlobalInvocationID.x;
+    if(id >= push.size) return;
+
+    float sum = 0;
+    
+    for (int i = 0; i < push.batchSize; i++)
+        sum += gradBatch[i * push.size + id];
+
+    grad[id] = sum;
+}

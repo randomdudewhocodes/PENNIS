@@ -10,7 +10,6 @@
 #include <optional>
 #include <random>
 #include <cmath>
-#include <omp.h>
 
 const std::vector<const char*> validationLayers = {
     "VK_LAYER_KHRONOS_validation"
@@ -58,15 +57,12 @@ class PENNIS
 public:
     void uploadInputs(const std::vector<float>& inputData);
     void uploadTargets(const std::vector<float>& targetData);
-    void runForwardBatch();
+    void train();
     void runForward();
-    void runBackprop();
-    void applyAdam();
     std::vector<float> predict(const std::vector<float>& inputData);
     void printArchitecture();
 
-    PENNIS(const uint32_t workgroupSize,
-           const uint32_t batchSize,
+    PENNIS(const uint32_t batchSize,
            const std::vector<uint32_t>& layerSizes,
            const std::vector<uint32_t>& activationTypes,
            const AdamParams adamParams);
@@ -81,21 +77,24 @@ private:
     VkDescriptorSetLayout forwardDescriptorSetLayout;
     VkDescriptorSetLayout backpropDescriptorSetLayout;
     VkDescriptorSetLayout adamDescriptorSetLayout;
+    VkDescriptorSetLayout reduceDescriptorSetLayout;
     VkPipelineLayout forwardPipelineLayout;
     VkPipeline forwardPipeline;
     VkPipelineLayout backpropPipelineLayout;
     VkPipeline backpropPipeline;
     VkPipelineLayout adamPipelineLayout;
     VkPipeline adamPipeline;
+    VkPipelineLayout reducePipelineLayout;
+    VkPipeline reducePipeline;
     VkCommandPool commandPool;
     VkDescriptorPool descriptorPool;
     std::vector<VkDescriptorSet> forwardDescriptorSets;
     std::vector<VkDescriptorSet> backpropDescriptorSets;
     std::vector<VkDescriptorSet> adamDescriptorSets;
+    std::vector<VkDescriptorSet> reduceDescriptorSets;
     VkCommandBuffer computeCommandBuffer;
     VkFence fence;
     
-    uint32_t workgroupSize;
     uint32_t batchSize;
     std::vector<Layer> layers;
     Buffer targetBuffer;
@@ -122,6 +121,7 @@ private:
     void recordForwardBatchCommandBuffer();
     void recordForwardCommandBuffer();
     void recordBackpropCommandBuffer();
+    void recordReduceCommandBuffer();
     void recordAdamCommandBuffer();
     void computeSubmission();
     

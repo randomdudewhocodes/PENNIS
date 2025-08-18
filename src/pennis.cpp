@@ -23,12 +23,11 @@ void DestroyDebugUtilsMessengerEXT(
         func(instance, debugMessenger, pAllocator);
 }
 
-PENNIS::PENNIS(const uint32_t workgroupSize,
-               const uint32_t batchSize,
+PENNIS::PENNIS(const uint32_t batchSize,
                const std::vector<uint32_t>& layerSizes,
                const std::vector<uint32_t>& activationTypes,
                const AdamParams adamParams)
-    : workgroupSize(workgroupSize), batchSize(batchSize), adamParams(adamParams)
+    : batchSize(batchSize), adamParams(adamParams)
 {
     size_t numLayers = layerSizes.size() - 1;
     layers.resize(numLayers);
@@ -47,6 +46,7 @@ PENNIS::PENNIS(const uint32_t workgroupSize,
     createComputePipeline("shaders/forward.spv",  forwardPipelineLayout,  forwardPipeline);
     createComputePipeline("shaders/backprop.spv", backpropPipelineLayout, backpropPipeline);
     createComputePipeline("shaders/adam.spv",     adamPipelineLayout,     adamPipeline);
+    createComputePipeline("shaders/reduce.spv",   reducePipelineLayout,   reducePipeline);
     createCommandPool();
     createShaderStorageBuffers();
     createDescriptorPool();
@@ -63,6 +63,9 @@ PENNIS::~PENNIS()
     vkDestroyPipeline(device, backpropPipeline, nullptr);
     vkDestroyPipelineLayout(device, backpropPipelineLayout, nullptr);
 
+    vkDestroyPipeline(device, reducePipeline, nullptr);
+    vkDestroyPipelineLayout(device, reducePipelineLayout, nullptr);
+
     vkDestroyPipeline(device, adamPipeline, nullptr);
     vkDestroyPipelineLayout(device, adamPipelineLayout, nullptr);
 
@@ -70,6 +73,7 @@ PENNIS::~PENNIS()
     
     vkDestroyDescriptorSetLayout(device, forwardDescriptorSetLayout, nullptr);
     vkDestroyDescriptorSetLayout(device, backpropDescriptorSetLayout, nullptr);
+    vkDestroyDescriptorSetLayout(device, reduceDescriptorSetLayout, nullptr);
     vkDestroyDescriptorSetLayout(device, adamDescriptorSetLayout, nullptr);
 
     for (auto& layer : layers)
@@ -126,11 +130,24 @@ void PENNIS::uploadTargets(const std::vector<float>& targetData)
     vkUnmapMemory(device, targetBuffer.memory);
 }
 
-void PENNIS::runForwardBatch()
+void PENNIS::train()
 {
     vkResetCommandBuffer(computeCommandBuffer, 0);
     recordForwardBatchCommandBuffer();
     computeSubmission();
+
+    vkResetCommandBuffer(computeCommandBuffer, 0);
+    recordBackpropCommandBuffer();
+    computeSubmission();
+
+    vkResetCommandBuffer(computeCommandBuffer, 0);
+    recordReduceCommandBuffer();
+    computeSubmission();
+
+    vkResetCommandBuffer(computeCommandBuffer, 0);
+    recordAdamCommandBuffer();
+    computeSubmission();
+    adamTimestep++;
 }
 
 void PENNIS::runForward()
@@ -138,64 +155,6 @@ void PENNIS::runForward()
     vkResetCommandBuffer(computeCommandBuffer, 0);
     recordForwardCommandBuffer();
     computeSubmission();
-}
-
-void PENNIS::runBackprop()
-{
-    vkResetCommandBuffer(computeCommandBuffer, 0);
-    recordBackpropCommandBuffer();
-    computeSubmission();
-    void* data;
-
-    for(int i = 0; i < layers.size(); i++)
-    {
-        const auto& L = layers[i];
-
-        int32_t inSize  = L.inSize;
-        int32_t outSize = L.outSize;
-        
-        std::vector<float> dWeightsBatch(batchSize * inSize * outSize);
-        std::vector<float> dWeights(inSize * outSize, 0);
-
-        vkMapMemory(device, L.dWeightsBatch.memory, 0, VK_WHOLE_SIZE, 0, (void**)&data);
-        std::memcpy(dWeightsBatch.data(), data, batchSize * inSize * outSize * sizeof(float));
-        vkUnmapMemory(device, L.dWeightsBatch.memory);
-
-        for (int i = 0; i < inSize * outSize; i++)
-        {
-            for (int j = 0; j < batchSize; j++)
-                dWeights[i] += dWeightsBatch[j * inSize * outSize + i];
-        }
-
-        vkMapMemory(device, L.dWeights.memory, 0, VK_WHOLE_SIZE, 0, (void**)&data);
-        memcpy(data, dWeights.data(), inSize * outSize * sizeof(float));
-        vkUnmapMemory(device, L.dWeights.memory);
-
-        std::vector<float> dBiasesBatch(batchSize * outSize);
-        std::vector<float> dBiases(outSize, 0);
-
-        vkMapMemory(device, L.dBiasesBatch.memory, 0, VK_WHOLE_SIZE, 0, (void**)&data);
-        std::memcpy(dBiasesBatch.data(), data, batchSize * outSize * sizeof(float));
-        vkUnmapMemory(device, L.dBiasesBatch.memory);
-
-        for (int i = 0; i < outSize; i++)
-        {
-            for (int j = 0; j < batchSize; j++)
-                dBiases[i] += dBiasesBatch[j * outSize + i];
-        }
-
-        vkMapMemory(device, L.dBiases.memory, 0, VK_WHOLE_SIZE, 0, (void**)&data);
-        memcpy(data, dBiases.data(), outSize * sizeof(float));
-        vkUnmapMemory(device, L.dBiases.memory);
-    }
-}
-
-void PENNIS::applyAdam()
-{
-    vkResetCommandBuffer(computeCommandBuffer, 0);
-    recordAdamCommandBuffer();
-    computeSubmission();
-    adamTimestep++;
 }
 
 std::vector<float> PENNIS::predict(const std::vector<float>& inputData)
@@ -243,6 +202,7 @@ void PENNIS::printArchitecture()
 
     float loss = 0.0f;
 
+    #pragma omp parallel for reduction(+:loss)
     for (size_t i = 0; i < outputSize; i++)
     {
         double diff = output[i] - target[i];
@@ -442,6 +402,19 @@ void PENNIS::createComputeDescriptorSetLayout()
     if (vkCreateDescriptorSetLayout(device, &backpropInfo, nullptr, &backpropDescriptorSetLayout) != VK_SUCCESS)
         throw std::runtime_error("failed to create backprop descriptor set layout!");
     
+    std::array<VkDescriptorSetLayoutBinding, 2> reduceBinding = {{
+        { 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
+        { 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr }
+    }};
+
+    VkDescriptorSetLayoutCreateInfo reduceInfo{};
+    reduceInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    reduceInfo.bindingCount = 2;
+    reduceInfo.pBindings = reduceBinding.data();
+
+    if (vkCreateDescriptorSetLayout(device, &reduceInfo, nullptr, &reduceDescriptorSetLayout) != VK_SUCCESS)
+        throw std::runtime_error("failed to create reduce descriptor set layout!");
+    
     std::array<VkDescriptorSetLayoutBinding, 4> adamBinding = {{
         { 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
         { 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
@@ -480,8 +453,9 @@ void PENNIS::createComputePipeline(
     uint32_t size;
     VkDescriptorSetLayout layout;
 
-    if      (shaderPath.find("forward") != std::string::npos)  size = 4 * sizeof(uint32_t),                      layout = forwardDescriptorSetLayout;
+    if      (shaderPath.find("forward")  != std::string::npos) size = 4 * sizeof(uint32_t),                      layout = forwardDescriptorSetLayout;
     else if (shaderPath.find("backprop") != std::string::npos) size = 6 * sizeof(uint32_t),                      layout = backpropDescriptorSetLayout;
+    else if (shaderPath.find("reduce")   != std::string::npos) size = 2 * sizeof(uint32_t),                      layout = reduceDescriptorSetLayout;
     else                                                       size = 2 * sizeof(uint32_t) + sizeof(AdamParams), layout = adamDescriptorSetLayout;
 
     pushRange.size = size;
@@ -634,9 +608,9 @@ void PENNIS::createShaderStorageBuffers()
 void PENNIS::createDescriptorPool()
 {
     uint32_t numLayers = static_cast<uint32_t>(layers.size());
-    uint32_t numDescriptorSets = numLayers * 4;
+    uint32_t numDescriptorSets = numLayers * 6;
 
-    uint32_t totalDescriptors = numLayers * 23;
+    uint32_t totalDescriptors = numLayers * 27;
 
     VkDescriptorPoolSize poolSize{};
     poolSize.type            = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -659,6 +633,7 @@ void PENNIS::createComputeDescriptorSets()
     
     std::vector<VkDescriptorSetLayout> forwardLayouts(numLayers, forwardDescriptorSetLayout);
     std::vector<VkDescriptorSetLayout> backpropLayouts(numLayers, backpropDescriptorSetLayout);
+    std::vector<VkDescriptorSetLayout> reduceLayouts(2 * numLayers, reduceDescriptorSetLayout);
     std::vector<VkDescriptorSetLayout> adamLayouts(2 * numLayers, adamDescriptorSetLayout);
 
     {
@@ -679,6 +654,16 @@ void PENNIS::createComputeDescriptorSets()
         backpropDescriptorSets.resize(numLayers);
         if (vkAllocateDescriptorSets(device, &allocInfo, backpropDescriptorSets.data()) != VK_SUCCESS)
             throw std::runtime_error("failed to allocate backprop descriptor sets!");
+    }
+
+    {
+        VkDescriptorSetAllocateInfo allocInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        allocInfo.descriptorPool     = descriptorPool;
+        allocInfo.descriptorSetCount = 2 * numLayers;
+        allocInfo.pSetLayouts        = reduceLayouts.data();
+        reduceDescriptorSets.resize(2 * numLayers);
+        if (vkAllocateDescriptorSets(device, &allocInfo, reduceDescriptorSets.data()) != VK_SUCCESS)
+            throw std::runtime_error("failed to allocate reduce descriptor sets!");
     }
 
     {
@@ -735,6 +720,18 @@ void PENNIS::createComputeDescriptorSets()
             {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, backpropDescriptorSets[i], 9, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &T,  nullptr}
         }};
         vkUpdateDescriptorSets(device, static_cast<uint32_t>(backWrites.size()), backWrites.data(), 0, nullptr);
+
+        std::array<VkWriteDescriptorSet,2> reduceWrites1 = {{
+            {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, reduceDescriptorSets[i * 2], 0, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &dWb, nullptr},
+            {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, reduceDescriptorSets[i * 2], 1, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &dW,  nullptr}
+        }};
+        vkUpdateDescriptorSets(device, static_cast<uint32_t>(reduceWrites1.size()), reduceWrites1.data(), 0, nullptr);
+
+        std::array<VkWriteDescriptorSet,2> reduceWrites2 = {{
+            {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, reduceDescriptorSets[i * 2 + 1], 0, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &dBb, nullptr},
+            {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, reduceDescriptorSets[i * 2 + 1], 1, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &dB,  nullptr}
+        }};
+        vkUpdateDescriptorSets(device, static_cast<uint32_t>(reduceWrites2.size()), reduceWrites2.data(), 0, nullptr);
 
         std::array<VkWriteDescriptorSet,4> adamWrites1 = {{
             {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, adamDescriptorSets[i * 2], 0, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &w,  nullptr},
@@ -1095,6 +1092,60 @@ void PENNIS::recordBackpropCommandBuffer()
         throw std::runtime_error("failed to record compute command buffer!");
 }
 
+void PENNIS::recordReduceCommandBuffer()
+{
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+    if (vkBeginCommandBuffer(computeCommandBuffer, &beginInfo) != VK_SUCCESS)
+        throw std::runtime_error("failed to begin recording compute command buffer!");
+
+    vkCmdBindPipeline(computeCommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, reducePipeline);
+
+    struct Push { uint32_t size, batchSize; } push;
+
+    push.batchSize = batchSize;
+
+    uint32_t groups;
+
+    for (int i = static_cast<int>(layers.size()) - 1; i >= 0; i--)
+    {
+        Layer& L = layers[i];
+
+        vkCmdBindDescriptorSets(
+            computeCommandBuffer,
+            VK_PIPELINE_BIND_POINT_COMPUTE,
+            reducePipelineLayout,
+            0, 1,
+            &reduceDescriptorSets[i * 2],
+            0, nullptr);
+        
+        push.size = L.inSize * L.outSize;
+        vkCmdPushConstants(computeCommandBuffer, reducePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+
+        groups = (L.inSize * L.outSize - 1) / 256 + 1;
+        vkCmdDispatch(computeCommandBuffer, groups, 1, 1);
+
+        vkCmdBindDescriptorSets(
+            computeCommandBuffer,
+            VK_PIPELINE_BIND_POINT_COMPUTE,
+            reducePipelineLayout,
+            0, 1,
+            &reduceDescriptorSets[i * 2 + 1],
+            0, nullptr);
+
+        push.size = L.outSize;
+        vkCmdPushConstants(computeCommandBuffer, reducePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+
+        groups = (L.outSize - 1) / 256 + 1;
+        vkCmdDispatch(computeCommandBuffer, groups, 1, 1);
+    }
+
+    if (vkEndCommandBuffer(computeCommandBuffer) != VK_SUCCESS)
+        throw std::runtime_error("failed to record compute command buffer!");
+}
+
 void PENNIS::recordAdamCommandBuffer()
 {
     VkCommandBufferBeginInfo beginInfo{};
@@ -1128,7 +1179,7 @@ void PENNIS::recordAdamCommandBuffer()
         push.size = L.inSize * L.outSize;
         vkCmdPushConstants(computeCommandBuffer, adamPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
 
-        groups = (L.inSize * L.outSize - 1) / workgroupSize + 1;
+        groups = (L.inSize * L.outSize - 1) / 256 + 1;
         vkCmdDispatch(computeCommandBuffer, groups, 1, 1);
 
         vkCmdBindDescriptorSets(
@@ -1142,7 +1193,7 @@ void PENNIS::recordAdamCommandBuffer()
         push.size = L.outSize;
         vkCmdPushConstants(computeCommandBuffer, adamPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
 
-        groups = (L.outSize - 1) / workgroupSize + 1;
+        groups = (L.outSize - 1) / 256 + 1;
         vkCmdDispatch(computeCommandBuffer, groups, 1, 1);
     }
 

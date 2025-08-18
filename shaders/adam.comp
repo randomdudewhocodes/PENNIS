@@ -2,14 +2,10 @@
 
 layout(local_size_x = 256) in;
 
-layout(set = 0, binding = 0)  buffer Weights  { float W[];  };
-layout(set = 0, binding = 1)  buffer Biases   { float B[];  };
-layout(set = 0, binding = 2)  buffer dWeights { float dW[]; };
-layout(set = 0, binding = 3)  buffer dBiases  { float dB[]; };
-layout(set = 0, binding = 4) buffer mWeights { float mW[]; };
-layout(set = 0, binding = 5) buffer vWeights { float vW[]; };
-layout(set = 0, binding = 6) buffer mBiases  { float mB[]; };
-layout(set = 0, binding = 7) buffer vBiases  { float vB[]; };
+layout(set = 0, binding = 0) buffer Vars  { float var[]; };
+layout(set = 0, binding = 1) buffer Grads { float grad[]; };
+layout(set = 0, binding = 2) buffer Mbuf  { float m[]; };
+layout(set = 0, binding = 3) buffer Vbuf  { float v[]; };
 
 struct AdamParams
 {
@@ -23,7 +19,6 @@ layout(push_constant) uniform PushConstants {
     AdamParams adamParams;
     uint t;
     uint size;
-    uint phase;
 } push;
 
 void main()
@@ -33,20 +28,9 @@ void main()
 
     AdamParams adamParams = push.adamParams;
 
-    if(push.phase == 0)
-    {
-        mW[id] = mix(dW[id], mW[id], adamParams.beta1);
-        vW[id] = mix(dW[id] * dW[id], vW[id], adamParams.beta2);
-        float mW_hat = mW[id] / (1 - pow(adamParams.beta1, float(push.t)));
-        float vW_hat = vW[id] / (1 - pow(adamParams.beta2, float(push.t)));
-        W[id] -= adamParams.learningRate * mW_hat / (sqrt(vW_hat) + adamParams.epsilon);
-    }
-    else
-    {
-        mB[id] = mix(dB[id], mB[id], adamParams.beta1);
-        vB[id] = mix(dB[id] * dB[id], vB[id], adamParams.beta2);
-        float mB_hat = mB[id] / (1 - pow(adamParams.beta1, float(push.t)));
-        float vB_hat = vB[id] / (1 - pow(adamParams.beta2, float(push.t)));
-        B[id] -= adamParams.learningRate * mB_hat / (sqrt(vB_hat) + adamParams.epsilon);
-    }
+    m[id] = mix(grad[id],            m[id], adamParams.beta1);
+    v[id] = mix(grad[id] * grad[id], v[id], adamParams.beta2);
+    float m_hat = m[id] / (1 - pow(adamParams.beta1, float(push.t)));
+    float v_hat = v[id] / (1 - pow(adamParams.beta2, float(push.t)));
+    var[id] -= adamParams.learningRate * m_hat / (sqrt(v_hat) + adamParams.epsilon);
 }

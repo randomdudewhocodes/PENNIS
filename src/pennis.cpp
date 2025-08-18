@@ -442,20 +442,16 @@ void PENNIS::createComputeDescriptorSetLayout()
     if (vkCreateDescriptorSetLayout(device, &backpropInfo, nullptr, &backpropDescriptorSetLayout) != VK_SUCCESS)
         throw std::runtime_error("failed to create backprop descriptor set layout!");
     
-    std::array<VkDescriptorSetLayoutBinding, 8> adamBinding = {{
+    std::array<VkDescriptorSetLayoutBinding, 4> adamBinding = {{
         { 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
         { 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
         { 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
-        { 3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
-        { 4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
-        { 5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
-        { 6, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
-        { 7, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
+        { 3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr }
     }};
 
     VkDescriptorSetLayoutCreateInfo adamInfo{};
     adamInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    adamInfo.bindingCount = 8;
+    adamInfo.bindingCount = 4;
     adamInfo.pBindings = adamBinding.data();
 
     if (vkCreateDescriptorSetLayout(device, &adamInfo, nullptr, &adamDescriptorSetLayout) != VK_SUCCESS)
@@ -486,7 +482,7 @@ void PENNIS::createComputePipeline(
 
     if      (shaderPath.find("forward") != std::string::npos)  size = 4 * sizeof(uint32_t),                      layout = forwardDescriptorSetLayout;
     else if (shaderPath.find("backprop") != std::string::npos) size = 6 * sizeof(uint32_t),                      layout = backpropDescriptorSetLayout;
-    else                                                       size = 3 * sizeof(uint32_t) + sizeof(AdamParams), layout = adamDescriptorSetLayout;
+    else                                                       size = 2 * sizeof(uint32_t) + sizeof(AdamParams), layout = adamDescriptorSetLayout;
 
     pushRange.size = size;
 
@@ -638,7 +634,7 @@ void PENNIS::createShaderStorageBuffers()
 void PENNIS::createDescriptorPool()
 {
     uint32_t numLayers = static_cast<uint32_t>(layers.size());
-    uint32_t numDescriptorSets = numLayers * 3;
+    uint32_t numDescriptorSets = numLayers * 4;
 
     uint32_t totalDescriptors = numLayers * 23;
 
@@ -663,7 +659,7 @@ void PENNIS::createComputeDescriptorSets()
     
     std::vector<VkDescriptorSetLayout> forwardLayouts(numLayers, forwardDescriptorSetLayout);
     std::vector<VkDescriptorSetLayout> backpropLayouts(numLayers, backpropDescriptorSetLayout);
-    std::vector<VkDescriptorSetLayout> adamLayouts(numLayers, adamDescriptorSetLayout);
+    std::vector<VkDescriptorSetLayout> adamLayouts(2 * numLayers, adamDescriptorSetLayout);
 
     {
         VkDescriptorSetAllocateInfo allocInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
@@ -688,9 +684,9 @@ void PENNIS::createComputeDescriptorSets()
     {
         VkDescriptorSetAllocateInfo allocInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
         allocInfo.descriptorPool     = descriptorPool;
-        allocInfo.descriptorSetCount = numLayers;
+        allocInfo.descriptorSetCount = 2 * numLayers;
         allocInfo.pSetLayouts        = adamLayouts.data();
-        adamDescriptorSets.resize(numLayers);
+        adamDescriptorSets.resize(2 * numLayers);
         if (vkAllocateDescriptorSets(device, &allocInfo, adamDescriptorSets.data()) != VK_SUCCESS)
             throw std::runtime_error("failed to allocate Adam descriptor sets!");
     }
@@ -740,17 +736,21 @@ void PENNIS::createComputeDescriptorSets()
         }};
         vkUpdateDescriptorSets(device, static_cast<uint32_t>(backWrites.size()), backWrites.data(), 0, nullptr);
 
-        std::array<VkWriteDescriptorSet,8> adamWrites = {{
-            {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, adamDescriptorSets[i], 0, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &w,  nullptr},
-            {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, adamDescriptorSets[i], 1, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &b,  nullptr},
-            {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, adamDescriptorSets[i], 2, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &dW, nullptr},
-            {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, adamDescriptorSets[i], 3, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &dB, nullptr},
-            {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, adamDescriptorSets[i], 4, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &mW, nullptr},
-            {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, adamDescriptorSets[i], 5, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &vW, nullptr},
-            {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, adamDescriptorSets[i], 6, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &mB, nullptr},
-            {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, adamDescriptorSets[i], 7, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &vB, nullptr}
+        std::array<VkWriteDescriptorSet,4> adamWrites1 = {{
+            {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, adamDescriptorSets[i * 2], 0, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &w,  nullptr},
+            {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, adamDescriptorSets[i * 2], 1, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &dW, nullptr},
+            {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, adamDescriptorSets[i * 2], 2, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &mW, nullptr},
+            {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, adamDescriptorSets[i * 2], 3, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &vW, nullptr}
         }};
-        vkUpdateDescriptorSets(device, static_cast<uint32_t>(adamWrites.size()), adamWrites.data(), 0, nullptr);
+        vkUpdateDescriptorSets(device, static_cast<uint32_t>(adamWrites1.size()), adamWrites1.data(), 0, nullptr);
+
+        std::array<VkWriteDescriptorSet,4> adamWrites2 = {{
+            {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, adamDescriptorSets[i * 2 + 1], 0, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &b,  nullptr},
+            {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, adamDescriptorSets[i * 2 + 1], 1, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &dB, nullptr},
+            {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, adamDescriptorSets[i * 2 + 1], 2, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &mB, nullptr},
+            {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, adamDescriptorSets[i * 2 + 1], 3, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &vB, nullptr}
+        }};
+        vkUpdateDescriptorSets(device, static_cast<uint32_t>(adamWrites2.size()), adamWrites2.data(), 0, nullptr);
     }
 }
 
@@ -1106,12 +1106,12 @@ void PENNIS::recordAdamCommandBuffer()
 
     vkCmdBindPipeline(computeCommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, adamPipeline);
 
-    struct Push { AdamParams adamParams; uint32_t t, size, phase; } push;
+    struct Push { AdamParams adamParams; uint32_t t, size; } push;
 
     push.adamParams = adamParams;
     push.t          = adamTimestep;
 
-    push.phase = 0;
+    uint32_t groups;
 
     for (int i = static_cast<int>(layers.size()) - 1; i >= 0; i--)
     {
@@ -1122,48 +1122,27 @@ void PENNIS::recordAdamCommandBuffer()
             VK_PIPELINE_BIND_POINT_COMPUTE,
             adamPipelineLayout,
             0, 1,
-            &adamDescriptorSets[i],
+            &adamDescriptorSets[i * 2],
             0, nullptr);
         
         push.size = L.inSize * L.outSize;
         vkCmdPushConstants(computeCommandBuffer, adamPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
 
-        uint32_t groups = (L.inSize * L.outSize - 1) / workgroupSize + 1;
+        groups = (L.inSize * L.outSize - 1) / workgroupSize + 1;
         vkCmdDispatch(computeCommandBuffer, groups, 1, 1);
-    }
-
-    VkMemoryBarrier memBarrier{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
-    memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-
-    vkCmdPipelineBarrier(
-    computeCommandBuffer,
-    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-    0,
-    1, &memBarrier,
-    0, nullptr,
-    0, nullptr
-    );
-
-    push.phase = 1;
-
-    for (int i = static_cast<int>(layers.size()) - 1; i >= 0; i--)
-    {
-        Layer& L = layers[i];
 
         vkCmdBindDescriptorSets(
             computeCommandBuffer,
             VK_PIPELINE_BIND_POINT_COMPUTE,
             adamPipelineLayout,
             0, 1,
-            &adamDescriptorSets[i],
+            &adamDescriptorSets[i * 2 + 1],
             0, nullptr);
 
         push.size = L.outSize;
         vkCmdPushConstants(computeCommandBuffer, adamPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
 
-        uint32_t groups = (L.outSize - 1) / workgroupSize + 1;
+        groups = (L.outSize - 1) / workgroupSize + 1;
         vkCmdDispatch(computeCommandBuffer, groups, 1, 1);
     }
 

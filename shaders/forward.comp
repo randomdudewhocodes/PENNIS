@@ -1,6 +1,6 @@
 #version 450
 
-layout(local_size_x = 256) in;
+layout(local_size_x = 16, local_size_y = 16) in;
 
 layout(set = 0, binding = 0) readonly  buffer Weights { float W[]; };
 layout(set = 0, binding = 1) readonly  buffer Biases  { float B[]; };
@@ -9,9 +9,7 @@ layout(set = 0, binding = 3) writeonly buffer PreActs { float Z[]; };
 layout(set = 0, binding = 4) writeonly buffer Acts    { float A[]; };
 
 layout(push_constant) uniform PushConstants {
-    uint inSize;
-    uint outSize;
-    uint actType;
+    uint inSize, outSize, batchSize, actType;
 } push;
 
 float activate(float x)
@@ -27,13 +25,17 @@ float activate(float x)
 
 void main()
 {
-    uint id = gl_GlobalInvocationID.x;
-    if(id >= push.outSize) return;
+    uint neuron = gl_GlobalInvocationID.x;
+    uint batch  = gl_GlobalInvocationID.y;
 
-    float z = 0;
+    if(neuron >= push.outSize || batch >= push.batchSize) return;
+
+    float z = B[neuron];
+
     for (uint i = 0; i < push.inSize; i++)
-        z += X[i] * W[id * push.inSize + i];
-    z += B[id];
+        z += X[batch * push.inSize + i] * W[neuron * push.inSize + i];
+
+    uint id = batch * push.outSize + neuron;
 
     Z[id] = z;
     A[id] = activate(z);

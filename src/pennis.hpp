@@ -47,7 +47,7 @@ struct AdamParams
 struct Layer
 {
     Buffer weights, biases, input, preActs, output,
-           dWeights, dBiases, dInput, delta, dOutput,
+           dWeightsBatch, dWeights, dBiasesBatch, dBiases, dInput, delta, dOutput,
            mWeights, vWeights, mBiases, vBiases;
     
     uint32_t inSize, outSize, actType;
@@ -58,6 +58,7 @@ class PENNIS
 public:
     void uploadInputs(const std::vector<float>& inputData);
     void uploadTargets(const std::vector<float>& targetData);
+    void runForwardBatch();
     void runForward();
     void runBackprop();
     void applyAdam();
@@ -65,6 +66,7 @@ public:
     void printArchitecture();
 
     PENNIS(const uint32_t workgroupSize,
+           const uint32_t batchSize,
            const std::vector<uint32_t>& layerSizes,
            const std::vector<uint32_t>& activationTypes,
            const AdamParams adamParams);
@@ -94,6 +96,7 @@ private:
     VkFence fence;
     
     uint32_t workgroupSize;
+    uint32_t batchSize;
     std::vector<Layer> layers;
     Buffer targetBuffer;
     AdamParams adamParams;
@@ -116,6 +119,7 @@ private:
     void createComputeDescriptorSets();
     void createComputeCommandBuffers();
     void createSyncObjects();
+    void recordForwardBatchCommandBuffer();
     void recordForwardCommandBuffer();
     void recordBackpropCommandBuffer();
     void recordAdamCommandBuffer();

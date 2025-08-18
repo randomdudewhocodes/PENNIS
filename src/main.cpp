@@ -8,32 +8,34 @@ int main()
     {
         std::vector<uint32_t> layerSizes = {1, 4, 4, 4, 1};
         std::vector<uint32_t> actTypes = {Tanh, Tanh, Tanh, Tanh};
-        AdamParams adamParams;
+        AdamParams adamParams = {0.9f, 0.999f, 1e-8f, 0.01f};
 
-        PENNIS pennis(256, layerSizes, actTypes, adamParams);
+        PENNIS pennis(256, 50, layerSizes, actTypes, adamParams);
         
-        const int epochs = 5000;
+        const int epochs = 1000;
 
         auto start_time = std::chrono::high_resolution_clock::now();
 
         std::vector<float> input, target;
 
+        for (int i = 0; i < 50; i++)
+        {
+            float x = float(i) / 49 * 3.141593 * 2;
+
+            input.push_back(x);
+            target.push_back(sin(x));
+        }
+
+        pennis.uploadInputs(input);
+        pennis.uploadTargets(target);
+
         for(int epoch = 0; epoch < epochs; epoch++)
         {
-            for (int i = 0; i < 10; i++)
-            {
-                float x = float(i) / 9 * 3.141593 * 2;
+            pennis.runForwardBatch();
+            pennis.runBackprop();
+            pennis.applyAdam();
 
-                std::vector<float> input = {x};
-                std::vector<float> target = {sin(x)};
-                pennis.uploadInputs(input);
-                pennis.uploadTargets(target);
-                pennis.runForward();
-                pennis.runBackprop();
-                pennis.applyAdam();
-            }
-
-            if(epoch % 100 == 0 || epoch == epochs - 1)
+            //if(epoch % 100 == 0 || epoch == epochs - 1)
             {
                 std::cout << "\nEpoch " << epoch << ":";
                 pennis.printArchitecture();

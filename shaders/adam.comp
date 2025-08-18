@@ -4,12 +4,12 @@ layout(local_size_x = 256) in;
 
 layout(set = 0, binding = 0)  buffer Weights  { float W[];  };
 layout(set = 0, binding = 1)  buffer Biases   { float B[];  };
-layout(set = 0, binding = 8)  buffer dWeights { float dW[]; };
-layout(set = 0, binding = 9)  buffer dBiases  { float dB[]; };
-layout(set = 0, binding = 10) buffer mWeights { float mW[]; };
-layout(set = 0, binding = 11) buffer vWeights { float vW[]; };
-layout(set = 0, binding = 12) buffer mBiases  { float mB[]; };
-layout(set = 0, binding = 13) buffer vBiases  { float vB[]; };
+layout(set = 0, binding = 2)  buffer dWeights { float dW[]; };
+layout(set = 0, binding = 3)  buffer dBiases  { float dB[]; };
+layout(set = 0, binding = 4) buffer mWeights { float mW[]; };
+layout(set = 0, binding = 5) buffer vWeights { float vW[]; };
+layout(set = 0, binding = 6) buffer mBiases  { float mB[]; };
+layout(set = 0, binding = 7) buffer vBiases  { float vB[]; };
 
 struct AdamParams
 {

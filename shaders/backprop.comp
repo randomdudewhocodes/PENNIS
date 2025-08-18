@@ -1,24 +1,20 @@
 #version 450
 
-layout(local_size_x = 256) in;
+layout(local_size_x = 16, local_size_y = 16) in;
 
-layout(set = 0, binding = 0)  readonly  buffer Weights  { float W[]; };
-layout(set = 0, binding = 2)  readonly  buffer Inputs   { float X[]; };
-layout(set = 0, binding = 3)  readonly  buffer PreActs  { float Z[]; };
-layout(set = 0, binding = 4)  readonly  buffer Acts     { float A[]; };
-layout(set = 0, binding = 5)  writeonly buffer dInput   { float dX[]; };
-layout(set = 0, binding = 6)            buffer delta    { float dZ[]; };
-layout(set = 0, binding = 7)  readonly  buffer dOutput  { float dA[]; };
-layout(set = 0, binding = 8)  writeonly buffer dWeights { float dW[]; };
-layout(set = 0, binding = 9)  writeonly buffer dBiases  { float dB[]; };
-layout(set = 0, binding = 14) readonly  buffer Targets  { float T[]; };
+layout(set = 0, binding = 0) readonly  buffer Weights { float W[]; };
+layout(set = 0, binding = 1) readonly  buffer Inputs  { float X[]; };
+layout(set = 0, binding = 2) readonly  buffer PreActs { float Z[]; };
+layout(set = 0, binding = 3) readonly  buffer Outputs { float A[]; };
+layout(set = 0, binding = 4) writeonly buffer dWBatch { float dWb[]; };
+layout(set = 0, binding = 5) writeonly buffer dBBatch { float dBb[]; };
+layout(set = 0, binding = 6) writeonly buffer dInput  { float dX[]; };
+layout(set = 0, binding = 7)           buffer delta   { float dZ[]; };
+layout(set = 0, binding = 8) readonly  buffer dOutput { float dA[]; };
+layout(set = 0, binding = 9) readonly  buffer Targets { float T[]; };
 
 layout(push_constant) uniform PushConstants {
-    uint inSize;
-    uint outSize;
-    uint actType;
-    uint isOutput;
-    uint phase;
+    uint inSize, outSize, batchSize, actType, isOutput, phase;
 } push;
 
 float dActivate(float x)
@@ -38,27 +34,33 @@ float dActivate(float x)
 
 void main()
 {
-    uint id = gl_GlobalInvocationID.x;
+    uint neuron = gl_GlobalInvocationID.x;
+    uint batch  = gl_GlobalInvocationID.y;
+    
+    if(batch >= push.batchSize) return;
 
     if(push.phase == 0)
     {
-        if(id >= push.outSize) return;
+        if(neuron >= push.outSize) return;
 
-        dZ[id] = push.isOutput == 0 ? dA[id] : 2 * (A[id] - T[id]) / push.outSize;
-        dZ[id] *= dActivate(Z[id]);
+        uint id = batch * push.outSize + neuron;
 
-        dB[id] = dZ[id];
+        float grad = (push.isOutput == 0 ? dA[id] : 2 * (A[id] - T[id]) / push.batchSize) * dActivate(Z[id]);
+
+        dBb[id] = dZ[id] = grad;
 
         for (uint i = 0; i < push.inSize; i++)
-            dW[id * push.inSize + i] = dZ[id] * X[i];
+            dWb[id * push.inSize + i] = grad * X[batch * push.inSize + i];
     }
     else
     {
-        if(id >= push.inSize) return;
+        if(neuron >= push.inSize) return;
 
-        dX[id] = 0;
+        float sum = 0;
 
         for (uint i = 0; i < push.outSize; i++)
-            dX[id] += W[i * push.inSize + id] * dZ[i];
+            sum += W[i * push.inSize + neuron] * dZ[i + batch * push.outSize];
+        
+        dX[batch * push.inSize + neuron] = sum;
     }
 }

@@ -195,20 +195,72 @@ void PENNIS::uploadTargets(const std::vector<float>& targetData)
 void PENNIS::train()
 {
     vkResetCommandBuffer(computeCommandBuffer, 0);
+
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+    if (vkBeginCommandBuffer(computeCommandBuffer, &beginInfo) != VK_SUCCESS)
+        throw std::runtime_error("failed to begin recording compute command buffer!");
+
     recordForwardBatchCommandBuffer();
-    computeSubmission();
 
-    vkResetCommandBuffer(computeCommandBuffer, 0);
+    {
+        VkMemoryBarrier memBarrier{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+        memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+        vkCmdPipelineBarrier(
+            computeCommandBuffer,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            0,
+            1, &memBarrier,
+            0, nullptr,
+            0, nullptr
+        );
+    }
+
     recordBackpropCommandBuffer();
-    computeSubmission();
 
-    vkResetCommandBuffer(computeCommandBuffer, 0);
+    {
+        VkMemoryBarrier memBarrier{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+        memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+        vkCmdPipelineBarrier(
+            computeCommandBuffer,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            0,
+            1, &memBarrier,
+            0, nullptr,
+            0, nullptr
+        );
+    }
+
     recordReduceCommandBuffer();
+
+    {
+        VkMemoryBarrier memBarrier{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+        memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+        vkCmdPipelineBarrier(
+            computeCommandBuffer,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            0,
+            1, &memBarrier,
+            0, nullptr,
+            0, nullptr
+        );
+    }
+
+    recordAdamCommandBuffer();
+
+    if (vkEndCommandBuffer(computeCommandBuffer) != VK_SUCCESS)
+        throw std::runtime_error("failed to end recording compute command buffer!");
+
     computeSubmission();
 
-    vkResetCommandBuffer(computeCommandBuffer, 0);
-    recordAdamCommandBuffer();
-    computeSubmission();
     adamTimestep++;
 }
 
@@ -739,23 +791,23 @@ void PENNIS::createComputeDescriptorSets()
 
         auto w = bufferInfo(L.weights);
         auto b = bufferInfo(L.biases);
-        auto x = bufferInfo(L.input);
+        auto x = bufferInfo(i == 0 ? L.input : layers[i - 1].output);
         auto z = bufferInfo(L.preActs);
         auto a = bufferInfo(L.output);
         auto dx = bufferInfo(L.dInput);
         auto dz = bufferInfo(L.delta);
-        auto da = bufferInfo(L.dOutput);
+        auto da = bufferInfo(i == layers.size() - 1 ? L.dOutput : layers[i + 1].dInput);
         auto dWb = bufferInfo(L.dWeightsBatch);
-        auto dW = bufferInfo(L.dWeights);
+        auto dW  = bufferInfo(L.dWeights);
         auto dBb = bufferInfo(L.dBiasesBatch);
-        auto dB = bufferInfo(L.dBiases);
+        auto dB  = bufferInfo(L.dBiases);
         auto mW = bufferInfo(L.mWeights);
         auto vW = bufferInfo(L.vWeights);
         auto mB = bufferInfo(L.mBiases);
         auto vB = bufferInfo(L.vBiases);
         auto T  = bufferInfo(targetBuffer);
 
-        std::array<VkWriteDescriptorSet,5> fwdWrites = {{
+        std::array<VkWriteDescriptorSet, 5> fwdWrites = {{
             {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, forwardDescriptorSets[i], 0, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &w, nullptr},
             {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, forwardDescriptorSets[i], 1, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &b, nullptr},
             {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, forwardDescriptorSets[i], 2, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &x, nullptr},
@@ -764,7 +816,7 @@ void PENNIS::createComputeDescriptorSets()
         }};
         vkUpdateDescriptorSets(device, static_cast<uint32_t>(fwdWrites.size()), fwdWrites.data(), 0, nullptr);
 
-        std::array<VkWriteDescriptorSet,10> backWrites = {{
+        std::array<VkWriteDescriptorSet, 10> backWrites = {{
             {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, backpropDescriptorSets[i], 0, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &w, nullptr},
             {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, backpropDescriptorSets[i], 1, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &x, nullptr},
             {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, backpropDescriptorSets[i], 2, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &z, nullptr},
@@ -778,19 +830,19 @@ void PENNIS::createComputeDescriptorSets()
         }};
         vkUpdateDescriptorSets(device, static_cast<uint32_t>(backWrites.size()), backWrites.data(), 0, nullptr);
 
-        std::array<VkWriteDescriptorSet,2> reduceWrites1 = {{
+        std::array<VkWriteDescriptorSet, 2> reduceWrites1 = {{
             {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, reduceDescriptorSets[i * 2], 0, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &dWb, nullptr},
             {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, reduceDescriptorSets[i * 2], 1, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &dW,  nullptr}
         }};
         vkUpdateDescriptorSets(device, static_cast<uint32_t>(reduceWrites1.size()), reduceWrites1.data(), 0, nullptr);
 
-        std::array<VkWriteDescriptorSet,2> reduceWrites2 = {{
+        std::array<VkWriteDescriptorSet, 2> reduceWrites2 = {{
             {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, reduceDescriptorSets[i * 2 + 1], 0, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &dBb, nullptr},
             {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, reduceDescriptorSets[i * 2 + 1], 1, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &dB,  nullptr}
         }};
         vkUpdateDescriptorSets(device, static_cast<uint32_t>(reduceWrites2.size()), reduceWrites2.data(), 0, nullptr);
 
-        std::array<VkWriteDescriptorSet,4> adamWrites1 = {{
+        std::array<VkWriteDescriptorSet, 4> adamWrites1 = {{
             {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, adamDescriptorSets[i * 2], 0, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &w,  nullptr},
             {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, adamDescriptorSets[i * 2], 1, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &dW, nullptr},
             {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, adamDescriptorSets[i * 2], 2, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &mW, nullptr},
@@ -798,7 +850,7 @@ void PENNIS::createComputeDescriptorSets()
         }};
         vkUpdateDescriptorSets(device, static_cast<uint32_t>(adamWrites1.size()), adamWrites1.data(), 0, nullptr);
 
-        std::array<VkWriteDescriptorSet,4> adamWrites2 = {{
+        std::array<VkWriteDescriptorSet, 4> adamWrites2 = {{
             {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, adamDescriptorSets[i * 2 + 1], 0, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &b,  nullptr},
             {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, adamDescriptorSets[i * 2 + 1], 1, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &dB, nullptr},
             {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, adamDescriptorSets[i * 2 + 1], 2, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &mB, nullptr},
@@ -907,88 +959,6 @@ void PENNIS::createSyncObjects()
         throw std::runtime_error("failed to create fence for compute submission");
 }
 
-void PENNIS::recordForwardBatchCommandBuffer()
-{
-    VkCommandBufferBeginInfo beginInfo{};
-    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-
-    if (vkBeginCommandBuffer(computeCommandBuffer, &beginInfo) != VK_SUCCESS)
-        throw std::runtime_error("failed to begin recording compute command buffer!");
-
-    vkCmdBindPipeline(computeCommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, forwardPipeline);
-
-    for (int i = 0; i < layers.size(); i++)
-    {
-        Layer& L = layers[i];
-
-        vkCmdBindDescriptorSets(
-            computeCommandBuffer,
-            VK_PIPELINE_BIND_POINT_COMPUTE,
-            forwardPipelineLayout,
-            0, 1, &forwardDescriptorSets[i],
-            0, nullptr);
-
-        struct Push{ uint32_t inSize, outSize, batchSize, actType; } push = { L.inSize, L.outSize, batchSize, L.actType };
-        vkCmdPushConstants(computeCommandBuffer, forwardPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
-
-        uint32_t groupsX = (L.outSize - 1) / 16 + 1;
-        uint32_t groupsY = (batchSize - 1) / 16 + 1;
-        vkCmdDispatch(computeCommandBuffer, groupsX, groupsY, 1);
-
-        if (i < layers.size() - 1)
-        {
-            VkMemoryBarrier memBarrier{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
-            memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-            memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-
-            vkCmdPipelineBarrier(
-                computeCommandBuffer,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                0,
-                1, &memBarrier,
-                0, nullptr,
-                0, nullptr
-            );
-            
-            VkBuffer src = L.output.buffer,
-                     dst = layers[i + 1].input.buffer;
-            
-            if (src == VK_NULL_HANDLE || dst == VK_NULL_HANDLE) continue;
-
-            VkBufferCopy copyRegion{};
-            copyRegion.srcOffset = 0;
-            copyRegion.dstOffset = 0;
-            copyRegion.size = batchSize * L.outSize * sizeof(float);
-
-            vkCmdCopyBuffer(computeCommandBuffer, src, dst, 1, &copyRegion);
-
-            VkBufferMemoryBarrier bufBarrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
-            bufBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-            bufBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-            bufBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            bufBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            bufBarrier.buffer = dst;
-            bufBarrier.offset = 0;
-            bufBarrier.size = VK_WHOLE_SIZE;
-
-            vkCmdPipelineBarrier(
-                computeCommandBuffer,
-                VK_PIPELINE_STAGE_TRANSFER_BIT,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                0,
-                0, nullptr,
-                1, &bufBarrier,
-                0, nullptr
-            );
-        }
-    }
-
-    if (vkEndCommandBuffer(computeCommandBuffer) != VK_SUCCESS)
-        throw std::runtime_error("failed to record compute command buffer!");
-}
-
 void PENNIS::recordForwardCommandBuffer()
 {
     VkCommandBufferBeginInfo beginInfo{};
@@ -1070,22 +1040,57 @@ void PENNIS::recordForwardCommandBuffer()
         throw std::runtime_error("failed to record compute command buffer!");
 }
 
+void PENNIS::recordForwardBatchCommandBuffer()
+{
+    vkCmdBindPipeline(computeCommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, forwardPipeline);
+
+    for (size_t i = 0; i < layers.size(); ++i)
+    {
+        Layer& L = layers[i];
+
+        vkCmdBindDescriptorSets(
+            computeCommandBuffer,
+            VK_PIPELINE_BIND_POINT_COMPUTE,
+            forwardPipelineLayout,
+            0, 1, &forwardDescriptorSets[i],
+            0, nullptr);
+
+        struct Push { uint32_t inSize, outSize, batchSize, actType; };
+        Push push = { L.inSize, L.outSize, batchSize, L.actType };
+        vkCmdPushConstants(computeCommandBuffer, forwardPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+
+        uint32_t groupsX = (L.outSize - 1) / 16 + 1;
+        uint32_t groupsY = (batchSize - 1) / 16 + 1;
+        vkCmdDispatch(computeCommandBuffer, groupsX, groupsY, 1);
+
+        if (i + 1 < layers.size())
+        {
+            VkMemoryBarrier memBarrier{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+            memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+            vkCmdPipelineBarrier(
+                computeCommandBuffer,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                0,
+                1, &memBarrier,
+                0, nullptr,
+                0, nullptr
+            );
+        }
+    }
+}
+
 void PENNIS::recordBackpropCommandBuffer()
 {
-    VkCommandBufferBeginInfo beginInfo{};
-    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-
-    if (vkBeginCommandBuffer(computeCommandBuffer, &beginInfo) != VK_SUCCESS)
-        throw std::runtime_error("failed to begin recording compute command buffer!");
-
     vkCmdBindPipeline(computeCommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, backpropPipeline);
 
     bool isOutput = true;
 
     struct Push { uint32_t inSize, outSize, batchSize, actType, isOutput, phase; } push;
 
-    for (int i = static_cast<int>(layers.size()) - 1; i >= 0; i--)
+    for (int i = static_cast<int>(layers.size()) - 1; i >= 0; --i)
     {
         Layer& L = layers[i];
 
@@ -1097,8 +1102,7 @@ void PENNIS::recordBackpropCommandBuffer()
             &backpropDescriptorSets[i],
             0, nullptr);
 
-        push = { L.inSize, L.outSize, batchSize, L.actType, static_cast<uint32_t>(isOutput), 0 };
-
+        push = { L.inSize, L.outSize, batchSize, L.actType, isOutput ? 1u : 0u, 0u };
         vkCmdPushConstants(computeCommandBuffer, backpropPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
 
         uint32_t groupsX = (L.outSize - 1) / 16 + 1;
@@ -1119,84 +1123,41 @@ void PENNIS::recordBackpropCommandBuffer()
                 0, nullptr,
                 0, nullptr
             );
-            
-            push.phase = 1;
-
-            vkCmdPushConstants(computeCommandBuffer, backpropPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
-
-            uint32_t groupsX = (L.inSize - 1) / 16 + 1;
-            uint32_t groupsY = (batchSize - 1) / 16 + 1;
-            vkCmdDispatch(computeCommandBuffer, groupsX, groupsY, 1);
-            
-            if(i > 0)
-            {
-                VkMemoryBarrier memBarrier{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
-                memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-                memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-
-                vkCmdPipelineBarrier(
-                    computeCommandBuffer,
-                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                    0,
-                    1, &memBarrier,
-                    0, nullptr,
-                    0, nullptr
-                );
-                
-                VkBuffer src = L.dInput.buffer,
-                         dst = layers[i - 1].dOutput.buffer;
-                
-                if (src == VK_NULL_HANDLE || dst == VK_NULL_HANDLE) continue;
-
-                VkBufferCopy copyRegion{};
-                copyRegion.srcOffset = 0;
-                copyRegion.dstOffset = 0;
-                copyRegion.size = batchSize * L.inSize * sizeof(float);
-
-                vkCmdCopyBuffer(computeCommandBuffer, src, dst, 1, &copyRegion);
-
-                VkBufferMemoryBarrier bufBarrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
-                bufBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-                bufBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-                bufBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-                bufBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-                bufBarrier.buffer = dst;
-                bufBarrier.offset = 0;
-                bufBarrier.size = VK_WHOLE_SIZE;
-
-                vkCmdPipelineBarrier(
-                    computeCommandBuffer,
-                    VK_PIPELINE_STAGE_TRANSFER_BIT,
-                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                    0,
-                    0, nullptr,
-                    1, &bufBarrier,
-                    0, nullptr
-                );
-            }
         }
 
-        if(isOutput) isOutput = false;
-    }
+        push.phase = 1u;
+        vkCmdPushConstants(computeCommandBuffer, backpropPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
 
-    if (vkEndCommandBuffer(computeCommandBuffer) != VK_SUCCESS)
-        throw std::runtime_error("failed to record compute command buffer!");
+        groupsX = (L.inSize - 1) / 16 + 1;
+        groupsY = (batchSize - 1) / 16 + 1;
+        vkCmdDispatch(computeCommandBuffer, groupsX, groupsY, 1);
+
+        if (i > 0)
+        {
+            VkMemoryBarrier memBarrier{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+            memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+            vkCmdPipelineBarrier(
+                computeCommandBuffer,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                0,
+                1, &memBarrier,
+                0, nullptr,
+                0, nullptr
+            );
+        }
+
+        if (isOutput) isOutput = false;
+    }
 }
 
 void PENNIS::recordReduceCommandBuffer()
 {
-    VkCommandBufferBeginInfo beginInfo{};
-    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-
-    if (vkBeginCommandBuffer(computeCommandBuffer, &beginInfo) != VK_SUCCESS)
-        throw std::runtime_error("failed to begin recording compute command buffer!");
-
     vkCmdBindPipeline(computeCommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, reducePipeline);
 
     struct Push { uint32_t size, batchSize; } push;
-
     push.batchSize = batchSize;
 
     uint32_t groups;
@@ -1212,12 +1173,22 @@ void PENNIS::recordReduceCommandBuffer()
             0, 1,
             &reduceDescriptorSets[i * 2],
             0, nullptr);
-        
+
         push.size = L.inSize * L.outSize;
         vkCmdPushConstants(computeCommandBuffer, reducePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
 
         groups = (L.inSize * L.outSize - 1) / 256 + 1;
         vkCmdDispatch(computeCommandBuffer, groups, 1, 1);
+
+        {
+            VkMemoryBarrier memBarrier{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+            memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            vkCmdPipelineBarrier(
+                computeCommandBuffer,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
+                1, &memBarrier, 0, nullptr, 0, nullptr);
+        }
 
         vkCmdBindDescriptorSets(
             computeCommandBuffer,
@@ -1232,25 +1203,24 @@ void PENNIS::recordReduceCommandBuffer()
 
         groups = (L.outSize - 1) / 256 + 1;
         vkCmdDispatch(computeCommandBuffer, groups, 1, 1);
-    }
 
-    if (vkEndCommandBuffer(computeCommandBuffer) != VK_SUCCESS)
-        throw std::runtime_error("failed to record compute command buffer!");
+        {
+            VkMemoryBarrier memBarrier{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+            memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            vkCmdPipelineBarrier(
+                computeCommandBuffer,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
+                1, &memBarrier, 0, nullptr, 0, nullptr);
+        }
+    }
 }
 
 void PENNIS::recordAdamCommandBuffer()
 {
-    VkCommandBufferBeginInfo beginInfo{};
-    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-
-    if (vkBeginCommandBuffer(computeCommandBuffer, &beginInfo) != VK_SUCCESS)
-        throw std::runtime_error("failed to begin recording compute command buffer!");
-
     vkCmdBindPipeline(computeCommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, adamPipeline);
 
     struct Push { AdamParams adamParams; uint32_t t, size; } push;
-
     push.adamParams = adamParams;
     push.t          = adamTimestep;
 
@@ -1267,12 +1237,22 @@ void PENNIS::recordAdamCommandBuffer()
             0, 1,
             &adamDescriptorSets[i * 2],
             0, nullptr);
-        
+
         push.size = L.inSize * L.outSize;
         vkCmdPushConstants(computeCommandBuffer, adamPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
 
         groups = (L.inSize * L.outSize - 1) / 256 + 1;
         vkCmdDispatch(computeCommandBuffer, groups, 1, 1);
+
+        {
+            VkMemoryBarrier memBarrier{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+            memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            vkCmdPipelineBarrier(
+                computeCommandBuffer,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
+                1, &memBarrier, 0, nullptr, 0, nullptr);
+        }
 
         vkCmdBindDescriptorSets(
             computeCommandBuffer,
@@ -1287,10 +1267,17 @@ void PENNIS::recordAdamCommandBuffer()
 
         groups = (L.outSize - 1) / 256 + 1;
         vkCmdDispatch(computeCommandBuffer, groups, 1, 1);
-    }
 
-    if (vkEndCommandBuffer(computeCommandBuffer) != VK_SUCCESS)
-        throw std::runtime_error("failed to record compute command buffer!");
+        {
+            VkMemoryBarrier memBarrier{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+            memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            vkCmdPipelineBarrier(
+                computeCommandBuffer,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
+                1, &memBarrier, 0, nullptr, 0, nullptr);
+        }
+    }
 }
 
 void PENNIS::computeSubmission()

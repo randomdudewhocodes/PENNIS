@@ -12,7 +12,8 @@ struct AdamParams
     float beta1,
           beta2,
           epsilon,
-          learningRate;
+          learningRate,
+          weightDecay;
 };
 
 layout(push_constant) uniform PushConstants {
@@ -28,9 +29,13 @@ void main()
 
     AdamParams adamParams = push.adamParams;
 
-    m[id] = mix(grad[id],            m[id], adamParams.beta1);
-    v[id] = mix(grad[id] * grad[id], v[id], adamParams.beta2);
+    m[id] = mix(grad[id], m[id], adamParams.beta1);
+
+    float diff = grad[id] - m[id];
+    v[id] = mix(diff * diff, v[id], adamParams.beta2);
+
     float m_hat = m[id] / (1 - pow(adamParams.beta1, float(push.t)));
     float v_hat = v[id] / (1 - pow(adamParams.beta2, float(push.t)));
-    var[id] -= adamParams.learningRate * m_hat / (sqrt(v_hat) + adamParams.epsilon);
+
+    var[id] -= adamParams.learningRate * (m_hat / (sqrt(v_hat) + adamParams.epsilon) + adamParams.weightDecay * var[id]);
 }

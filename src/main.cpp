@@ -7,12 +7,12 @@ int main()
     try
     {
         std::vector<uint32_t> layerSizes = {1, 4, 4, 4, 1};
-        std::vector<uint32_t> actTypes = {Tanh, Tanh, Tanh, Tanh};
+        std::vector<uint32_t> actTypes = {Tanh, Tanh, Tanh, None};
         AdamParams adamParams = {0.9f, 0.999f, 1e-8f, 0.01f};
 
         PENNIS pennis(50, layerSizes, actTypes, adamParams);
         
-        const int epochs = 1000;
+        const int epochs = 5000;
 
         auto start_time = std::chrono::high_resolution_clock::now();
 

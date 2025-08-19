@@ -40,7 +40,8 @@ struct AdamParams
     float beta1 = 0.9f,
           beta2 = 0.999f,
           epsilon = 1e-8f,
-          learningRate = 0.001f;
+          learningRate = 0.001f,
+          weightDecay = 0.01f;
 };
 
 struct Layer

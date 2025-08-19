@@ -192,6 +192,21 @@ void PENNIS::uploadTargets(const std::vector<float>& targetData)
     uploadToDeviceBuffer(targetData.data(), targetData.size() * sizeof(float), targetBuffer);
 }
 
+inline VkBufferMemoryBarrier makeBarrier(VkBuffer buf)
+{
+    return VkBufferMemoryBarrier{
+        VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+        nullptr,
+        VK_ACCESS_SHADER_WRITE_BIT,
+        VK_ACCESS_SHADER_READ_BIT,
+        VK_QUEUE_FAMILY_IGNORED,
+        VK_QUEUE_FAMILY_IGNORED,
+        buf,
+        0,
+        VK_WHOLE_SIZE
+    };
+}
+
 void PENNIS::train()
 {
     vkResetCommandBuffer(computeCommandBuffer, 0);
@@ -206,16 +221,21 @@ void PENNIS::train()
     recordForwardBatchCommandBuffer();
 
     {
-        VkMemoryBarrier memBarrier{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
-        memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        std::vector<VkBufferMemoryBarrier> bufBarriers;
+        bufBarriers.reserve(layers.size() * 2);
+        for (auto &L : layers)
+        {
+            bufBarriers.push_back(makeBarrier(L.preActs.buffer));
+            bufBarriers.push_back(makeBarrier(L.output.buffer));
+        }
 
         vkCmdPipelineBarrier(
             computeCommandBuffer,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
             0,
-            1, &memBarrier,
             0, nullptr,
+            layers.size() * 2, bufBarriers.data(),
             0, nullptr
         );
     }
@@ -223,16 +243,21 @@ void PENNIS::train()
     recordBackpropCommandBuffer();
 
     {
-        VkMemoryBarrier memBarrier{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
-        memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        std::vector<VkBufferMemoryBarrier> bufBarriers;
+        bufBarriers.reserve(layers.size() * 2);
+        for (auto &L : layers)
+        {
+            bufBarriers.push_back(makeBarrier(L.dWeightsBatch.buffer));
+            bufBarriers.push_back(makeBarrier(L.dBiasesBatch.buffer));
+        }
 
         vkCmdPipelineBarrier(
             computeCommandBuffer,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
             0,
-            1, &memBarrier,
             0, nullptr,
+            layers.size() * 2, bufBarriers.data(),
             0, nullptr
         );
     }
@@ -240,16 +265,20 @@ void PENNIS::train()
     recordReduceCommandBuffer();
 
     {
-        VkMemoryBarrier memBarrier{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
-        memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        std::vector<VkBufferMemoryBarrier> bufBarriers;
+        bufBarriers.reserve(layers.size() * 2);
+        for (auto &L : layers) {
+            bufBarriers.push_back(makeBarrier(L.dWeights.buffer));
+            bufBarriers.push_back(makeBarrier(L.dBiases.buffer));
+        }
 
         vkCmdPipelineBarrier(
             computeCommandBuffer,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
             0,
-            1, &memBarrier,
             0, nullptr,
+            layers.size() * 2, bufBarriers.data(),
             0, nullptr
         );
     }
@@ -1065,17 +1094,14 @@ void PENNIS::recordForwardBatchCommandBuffer()
 
         if (i + 1 < layers.size())
         {
-            VkMemoryBarrier memBarrier{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
-            memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-            memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-
+            auto memBarrier = makeBarrier(L.output.buffer);
             vkCmdPipelineBarrier(
                 computeCommandBuffer,
                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                 0,
-                1, &memBarrier,
                 0, nullptr,
+                1, &memBarrier,
                 0, nullptr
             );
         }
@@ -1110,17 +1136,15 @@ void PENNIS::recordBackpropCommandBuffer()
         vkCmdDispatch(computeCommandBuffer, groupsX, groupsY, 1);
 
         {
-            VkMemoryBarrier memBarrier{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
-            memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-            memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            auto memBarrier = makeBarrier(L.delta.buffer);
 
             vkCmdPipelineBarrier(
                 computeCommandBuffer,
                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                 0,
-                1, &memBarrier,
                 0, nullptr,
+                1, &memBarrier,
                 0, nullptr
             );
         }
@@ -1134,17 +1158,15 @@ void PENNIS::recordBackpropCommandBuffer()
 
         if (i > 0)
         {
-            VkMemoryBarrier memBarrier{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
-            memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-            memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            auto memBarrier = makeBarrier(L.dInput.buffer);
 
             vkCmdPipelineBarrier(
                 computeCommandBuffer,
                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                 0,
-                1, &memBarrier,
                 0, nullptr,
+                1, &memBarrier,
                 0, nullptr
             );
         }
@@ -1179,16 +1201,6 @@ void PENNIS::recordReduceCommandBuffer()
 
         groups = (L.inSize * L.outSize - 1) / 256 + 1;
         vkCmdDispatch(computeCommandBuffer, groups, 1, 1);
-
-        {
-            VkMemoryBarrier memBarrier{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
-            memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-            memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-            vkCmdPipelineBarrier(
-                computeCommandBuffer,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
-                1, &memBarrier, 0, nullptr, 0, nullptr);
-        }
 
         vkCmdBindDescriptorSets(
             computeCommandBuffer,
@@ -1243,16 +1255,6 @@ void PENNIS::recordAdamCommandBuffer()
 
         groups = (L.inSize * L.outSize - 1) / 256 + 1;
         vkCmdDispatch(computeCommandBuffer, groups, 1, 1);
-
-        {
-            VkMemoryBarrier memBarrier{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
-            memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-            memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-            vkCmdPipelineBarrier(
-                computeCommandBuffer,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
-                1, &memBarrier, 0, nullptr, 0, nullptr);
-        }
 
         vkCmdBindDescriptorSets(
             computeCommandBuffer,

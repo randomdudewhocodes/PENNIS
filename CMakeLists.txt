@@ -4,11 +4,11 @@ project(pennis LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Find Vulkan and glslc
+# ---------------- Vulkan ----------------
 find_package(Vulkan REQUIRED)
 find_program(GLSLC_EXECUTABLE glslc REQUIRED)
 
-# Function to add shader compilation as a custom target
+# ---------------- Shaders ----------------
 function(add_shaders TARGET_NAME)
     set(SHADER_SOURCE_FILES ${ARGN})
 
@@ -47,17 +47,30 @@ function(add_shaders TARGET_NAME)
 endfunction()
 
 # Compile shader files
-add_shaders(shaders shaders/forward.comp shaders/backprop.comp shaders/reduce.comp shaders/adam.comp) 
+add_shaders(shaders
+    shaders/forward.comp
+    shaders/backprop.comp
+    shaders/reduce.comp
+    shaders/adam.comp
+)
 
-# Create executable
+# ---------------- Raylib ----------------
+add_subdirectory("${CMAKE_SOURCE_DIR}/raylib" ${CMAKE_BINARY_DIR}/raylib)
+
+# ---------------- Executable ----------------
 add_executable(pennis
     src/main.cpp
     src/pennis.cpp
 )
 
-# Ensure executable depends on shader compilation
+# Ensure shaders build first
 add_dependencies(pennis shaders)
 
-# Link Vulkan
+# Link Vulkan + raylib
 target_include_directories(pennis PRIVATE ${Vulkan_INCLUDE_DIRS})
-target_link_libraries(pennis PRIVATE ${Vulkan_LIBRARIES})
+target_link_libraries(pennis PRIVATE ${Vulkan_LIBRARIES} raylib)
+
+# Windows extras (needed by raylib)
+if (MSVC)
+    target_link_libraries(pennis PRIVATE winmm.lib gdi32.lib opengl32.lib)
+endif()

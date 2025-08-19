@@ -35,7 +35,6 @@ int main()
 
         SetConfigFlags(FLAG_MSAA_4X_HINT);
         InitWindow(screenWidth, screenHeight, "NN Training Visualizer");
-        SetTargetFPS(60);
 
         const float scaleX = screenWidth / (2 * 3.141593f);
         const float scaleY = screenWidth / (2 * 3.141593f);
@@ -51,7 +50,7 @@ int main()
 
         while (!WindowShouldClose())
         {
-            for (int i = 0; i < 50 && currentEpoch < epochs; i++)
+            for (int i = 0; i < 100 && currentEpoch < epochs; i++)
             {
                 pennis.train();
                 currentEpoch++;

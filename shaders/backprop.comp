@@ -1,6 +1,6 @@
 #version 450
 
-layout(local_size_x = 16, local_size_y = 16) in;
+layout(local_size_x = 256) in;
 
 layout(set = 0, binding = 0) readonly  buffer Weights { float W[]; };
 layout(set = 0, binding = 1) readonly  buffer Inputs  { float X[]; };
@@ -34,16 +34,15 @@ float dActivate(float x)
 
 void main()
 {
-    uint neuron = gl_GlobalInvocationID.x;
-    uint batch  = gl_GlobalInvocationID.y;
-    
-    if(batch >= push.batchSize) return;
+    uint id = gl_GlobalInvocationID.x;
+    uint neuron, batch;
 
     if(push.phase == 0)
     {
-        if(neuron >= push.outSize) return;
+        if(id >= push.outSize * push.batchSize) return;
 
-        uint id = batch * push.outSize + neuron;
+        neuron = id % push.outSize;
+        batch  = id / push.outSize;
 
         float grad = (push.isOutput == 0 ? dA[id] : 2 * (A[id] - T[id]) / push.batchSize) * dActivate(Z[id]);
 
@@ -54,13 +53,16 @@ void main()
     }
     else
     {
-        if(neuron >= push.inSize) return;
+        if(id >= push.inSize * push.batchSize) return;
+
+        neuron = id % push.inSize;
+        batch  = id / push.inSize;
 
         float sum = 0;
 
         for (uint i = 0; i < push.outSize; i++)
             sum += W[i * push.inSize + neuron] * dZ[i + batch * push.outSize];
         
-        dX[batch * push.inSize + neuron] = sum;
+        dX[id] = sum;
     }
 }

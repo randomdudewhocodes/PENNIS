@@ -131,7 +131,16 @@ private:
                       VkBufferUsageFlags usage,
                       VkMemoryPropertyFlags properties,
                       Buffer& buf);
+    
+    VkCommandBuffer beginSingleTimeCommands();
+
+    void endSingleTimeCommands(VkCommandBuffer commandBuffer);
+
     uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties);
+
+    void createDeviceLocalBufferWithStaging(const void* srcData, VkDeviceSize size, VkBufferUsageFlags dstUsage, Buffer& dstBuf);
+    void uploadToDeviceBuffer(const void* srcData, VkDeviceSize size, Buffer& dstBuf);
+    void readbackFromDeviceBuffer(Buffer& srcBuf, void* dstMemory, VkDeviceSize size);
 
     VkDescriptorBufferInfo bufferInfo(const Buffer& buf)
     {

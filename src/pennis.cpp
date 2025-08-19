@@ -112,22 +112,84 @@ PENNIS::~PENNIS()
     vkDestroyInstance(instance, nullptr);
 }
 
+void PENNIS::createDeviceLocalBufferWithStaging(const void* srcData, VkDeviceSize size, VkBufferUsageFlags dstUsage, Buffer& dstBuf)
+{
+    Buffer staging;
+    createBuffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                 staging);
+
+    void* data;
+    vkMapMemory(device, staging.memory, 0, size, 0, &data);
+    memcpy(data, srcData, (size_t)size);
+    vkUnmapMemory(device, staging.memory);
+
+    createBuffer(size, dstUsage | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                 VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, dstBuf);
+
+    VkCommandBuffer copyCmd = beginSingleTimeCommands();
+    VkBufferCopy copyRegion{};
+    copyRegion.srcOffset = 0;
+    copyRegion.dstOffset = 0;
+    copyRegion.size = size;
+    vkCmdCopyBuffer(copyCmd, staging.buffer, dstBuf.buffer, 1, &copyRegion);
+    endSingleTimeCommands(copyCmd);
+
+    vkDestroyBuffer(device, staging.buffer, nullptr);
+    vkFreeMemory(device, staging.memory, nullptr);
+}
+
+void PENNIS::uploadToDeviceBuffer(const void* srcData, VkDeviceSize size, Buffer& dstBuf)
+{
+    Buffer staging;
+    createBuffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                 staging);
+
+    void* data;
+    vkMapMemory(device, staging.memory, 0, size, 0, &data);
+    memcpy(data, srcData, (size_t)size);
+    vkUnmapMemory(device, staging.memory);
+
+    VkCommandBuffer cmd = beginSingleTimeCommands();
+    VkBufferCopy copyRegion{0,0,size};
+    vkCmdCopyBuffer(cmd, staging.buffer, dstBuf.buffer, 1, &copyRegion);
+    endSingleTimeCommands(cmd);
+
+    vkDestroyBuffer(device, staging.buffer, nullptr);
+    vkFreeMemory(device, staging.memory, nullptr);
+}
+
+void PENNIS::readbackFromDeviceBuffer(Buffer& srcBuf, void* dstMemory, VkDeviceSize size)
+{
+    Buffer staging;
+    createBuffer(size, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                 staging);
+
+    VkCommandBuffer cmd = beginSingleTimeCommands();
+    VkBufferCopy copyRegion{0,0,size};
+    vkCmdCopyBuffer(cmd, srcBuf.buffer, staging.buffer, 1, &copyRegion);
+    endSingleTimeCommands(cmd);
+
+    void* data;
+    vkMapMemory(device, staging.memory, 0, size, 0, &data);
+    memcpy(dstMemory, data, (size_t)size);
+    vkUnmapMemory(device, staging.memory);
+
+    vkDestroyBuffer(device, staging.buffer, nullptr);
+    vkFreeMemory(device, staging.memory, nullptr);
+}
+
 void PENNIS::uploadInputs(const std::vector<float>& inputData)
 {
     Layer& inputLayer = layers.front();
-
-    void* data;
-    vkMapMemory(device, inputLayer.input.memory, 0, inputData.size() * sizeof(float), 0, &data);
-    memcpy(data, inputData.data(), inputData.size() * sizeof(float));
-    vkUnmapMemory(device, inputLayer.input.memory);
+    uploadToDeviceBuffer(inputData.data(), inputData.size() * sizeof(float), inputLayer.input);
 }
 
 void PENNIS::uploadTargets(const std::vector<float>& targetData)
 {
-    void* data;
-    vkMapMemory(device, targetBuffer.memory, 0, targetData.size() * sizeof(float), 0, &data);
-    memcpy(data, targetData.data(), targetData.size() * sizeof(float));
-    vkUnmapMemory(device, targetBuffer.memory);
+    uploadToDeviceBuffer(targetData.data(), targetData.size() * sizeof(float), targetBuffer);
 }
 
 void PENNIS::train()
@@ -161,14 +223,12 @@ std::vector<float> PENNIS::predict(const std::vector<float>& inputData)
 {
     uploadInputs(inputData);
     runForward();
+
     Layer& outLayer = layers.back();
     uint32_t outputSize = outLayer.outSize;
-    
+
     std::vector<float> output(outputSize);
-    void* data;
-    vkMapMemory(device, outLayer.output.memory, 0, outputSize * sizeof(float), 0, &data);
-    std::memcpy(output.data(), data, outputSize * sizeof(float));
-    vkUnmapMemory(device, outLayer.output.memory);
+    readbackFromDeviceBuffer(outLayer.output, output.data(), outputSize * sizeof(float));
 
     return output;
 }
@@ -187,28 +247,21 @@ const char* activationName(uint32_t activationType)
 void PENNIS::printArchitecture()
 {
     Layer& outLayer = layers.back();
-    uint32_t outputSize = batchSize * outLayer.outSize;
-    
-    std::vector<float> output(outputSize);
-    void* data;
-    vkMapMemory(device, outLayer.output.memory, 0, outputSize * sizeof(float), 0, &data);
-    std::memcpy(output.data(), data, outputSize * sizeof(float));
-    vkUnmapMemory(device, outLayer.output.memory);
+    uint32_t totalOutputSize = batchSize * outLayer.outSize;
 
-    std::vector<float> target(outputSize);
-    vkMapMemory(device, targetBuffer.memory, 0, outputSize * sizeof(float), 0, &data);
-    std::memcpy(target.data(), data, outputSize * sizeof(float));
-    vkUnmapMemory(device, targetBuffer.memory);
+    std::vector<float> output(totalOutputSize);
+    readbackFromDeviceBuffer(outLayer.output, output.data(), totalOutputSize * sizeof(float));
+
+    std::vector<float> target(totalOutputSize);
+    readbackFromDeviceBuffer(targetBuffer, target.data(), totalOutputSize * sizeof(float));
 
     float loss = 0.0f;
-
     #pragma omp parallel for reduction(+:loss)
-    for (size_t i = 0; i < outputSize; i++)
+    for (size_t i = 0; i < totalOutputSize; i++)
     {
         double diff = output[i] - target[i];
         loss += diff * diff;
     }
-
     loss /= batchSize;
 
     std::cout << "\nNeural network architecture: (Loss: " << loss << ")\n";
@@ -220,30 +273,25 @@ void PENNIS::printArchitecture()
         int32_t inputSize  = L.inSize;
         int32_t outputSize = L.outSize;
 
-        std::cout << "Layer " << i << ": " << inputSize << " -> " << outputSize << " Activation: " << activationName(L.actType);
+        std::cout << "Layer " << i << ": " << inputSize << " -> " << outputSize
+                  << " Activation: " << activationName(L.actType);
         std::cout << "\nWeights:\n";
 
-        std::vector<float> weights(inputSize * outputSize);
-        std::vector<float> biases(outputSize);
+        std::vector<float> weights((size_t)inputSize * outputSize);
+        readbackFromDeviceBuffer(const_cast<Buffer&>(L.weights), weights.data(),
+                                 (VkDeviceSize)inputSize * outputSize * sizeof(float));
 
-        void* data;
-        vkMapMemory(device, L.weights.memory, 0, inputSize * outputSize * sizeof(float), 0, &data);
-        std::memcpy(weights.data(), data, inputSize * outputSize * sizeof(float));
-        for(int j = 0; j < inputSize * outputSize; j++)
-        {
-            std::cout << weights[j] << " "; 
-        }
-        vkUnmapMemory(device, L.weights.memory);
+        for (size_t j = 0; j < weights.size(); ++j)
+            std::cout << weights[j] << " ";
         
         std::cout << "\nBiases:\n";
-        vkMapMemory(device, L.biases.memory, 0, outputSize * sizeof(float), 0, &data);
-        std::memcpy(biases.data(), data, outputSize * sizeof(float));
-        for(int j = 0; j < outputSize; j++)
-        {
-            std::cout << biases[j] << " "; 
-        }
-        vkUnmapMemory(device, L.biases.memory);
-        
+
+        std::vector<float> biases(outputSize);
+        readbackFromDeviceBuffer(const_cast<Buffer&>(L.biases), biases.data(),
+                                 (VkDeviceSize)outputSize * sizeof(float));
+
+        for (size_t j = 0; j < biases.size(); ++j)
+            std::cout << biases[j] << " ";
         std::cout << "\n\n";
     }
 }
@@ -498,110 +546,119 @@ void PENNIS::createCommandPool()
 void PENNIS::createShaderStorageBuffers()
 {
     size_t numLayers = layers.size();
-    
-    float* data;
 
     std::random_device rd;
     std::mt19937 gen(rd());
-    std::uniform_real_distribution<float> dist(-1, 1);
+    std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
 
     for (size_t i = 0; i < numLayers; i++)
     {
         Layer& L = layers[i];
-        
-        uint32_t inSize = L.inSize;
+
+        uint32_t inSize  = L.inSize;
         uint32_t outSize = L.outSize;
 
-        createBuffer(inSize * outSize * sizeof(float),
-                     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                     L.weights);
-        
-        createBuffer(outSize * sizeof(float),
-                     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                     L.biases);
-        
-        vkMapMemory(device, L.weights.memory, 0, VK_WHOLE_SIZE, 0, (void**)&data);
-        for (uint32_t j = 0; j < inSize * outSize; j++) data[j] = dist(gen);
-        vkUnmapMemory(device, L.weights.memory);
+        VkDeviceSize weightsSize = (VkDeviceSize)inSize * (VkDeviceSize)outSize * sizeof(float);
+        VkDeviceSize biasesSize  = (VkDeviceSize)outSize * sizeof(float);
+        VkDeviceSize inputSize   = (VkDeviceSize)batchSize * (VkDeviceSize)inSize * sizeof(float);
+        VkDeviceSize preActsSize = (VkDeviceSize)batchSize * (VkDeviceSize)outSize * sizeof(float);
+        VkDeviceSize outputSize  = (VkDeviceSize)batchSize * (VkDeviceSize)outSize * sizeof(float);
+        VkDeviceSize dInputSize  = (VkDeviceSize)batchSize * (VkDeviceSize)inSize * sizeof(float);
+        VkDeviceSize dOutputSize = (VkDeviceSize)batchSize * (VkDeviceSize)outSize * sizeof(float);
+        VkDeviceSize dWBatchSize = (VkDeviceSize)batchSize * (VkDeviceSize)inSize * (VkDeviceSize)outSize * sizeof(float);
+        VkDeviceSize dWSize      = weightsSize;
+        VkDeviceSize dBBatchSize = (VkDeviceSize)batchSize * (VkDeviceSize)outSize * sizeof(float);
+        VkDeviceSize dBSize      = biasesSize;
+        VkDeviceSize mWSize      = weightsSize;
+        VkDeviceSize vWSize      = weightsSize;
+        VkDeviceSize mBSize      = biasesSize;
+        VkDeviceSize vBSize      = biasesSize;
 
-        vkMapMemory(device, L.biases.memory, 0, VK_WHOLE_SIZE, 0, (void**)&data);
-        for (uint32_t j = 0; j < outSize; j++) data[j] = dist(gen);
-        vkUnmapMemory(device, L.biases.memory);
+        std::vector<float> initWeights((size_t)inSize * outSize);
+        for (size_t j = 0; j < initWeights.size(); ++j) initWeights[j] = dist(gen);
 
-        createBuffer(batchSize * inSize * sizeof(float),
+        createDeviceLocalBufferWithStaging(initWeights.data(), weightsSize,
+                                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                           L.weights);
+
+        std::vector<float> initBiases((size_t)outSize);
+        for (size_t j = 0; j < initBiases.size(); ++j) initBiases[j] = dist(gen);
+
+        createDeviceLocalBufferWithStaging(initBiases.data(), biasesSize,
+                                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                           L.biases);
+
+        createBuffer(inputSize,
                      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                      L.input);
 
-        createBuffer(batchSize * outSize * sizeof(float),
-                     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        createBuffer(preActsSize,
+                     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                      L.preActs);
-        
-        createBuffer(batchSize * outSize * sizeof(float),
-                     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+
+        createBuffer(outputSize,
+                     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                      L.output);
 
-        createBuffer(batchSize * inSize * sizeof(float),
-                     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        createBuffer(dInputSize,
+                     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                      L.dInput);
-        
-        createBuffer(batchSize * outSize * sizeof(float),
-                     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+
+        createBuffer(dOutputSize,
+                     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                      L.delta);
 
-        createBuffer(batchSize * outSize * sizeof(float),
+        createBuffer(dOutputSize,
                      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                      L.dOutput);
 
-        createBuffer(batchSize * inSize * outSize * sizeof(float),
-                     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        createBuffer(dWBatchSize,
+                     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                      L.dWeightsBatch);
-            
-        createBuffer(inSize * outSize * sizeof(float),
-                     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+
+        createBuffer(dWSize,
+                     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                      L.dWeights);
-        
-        createBuffer(batchSize * outSize * sizeof(float),
-                     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+
+        createBuffer(dBBatchSize,
+                     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                      L.dBiasesBatch);
-        
-        createBuffer(outSize * sizeof(float),
-                     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+
+        createBuffer(dBSize,
+                     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                      L.dBiases);
 
-        auto allocBuffer = [&](Buffer& buf, size_t size)
-        {
-            createBuffer(size * sizeof(float),
-                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                         buf);
-            
-            vkMapMemory(device, buf.memory, 0, VK_WHOLE_SIZE, 0, (void**)&data);
-            for (uint32_t j = 0; j < size; j++) data[j] = 0.0f; 
-            vkUnmapMemory(device, buf.memory);
-        };
+        std::vector<float> zerosW((size_t)inSize * outSize, 0.0f);
+        createDeviceLocalBufferWithStaging(zerosW.data(), mWSize,
+                                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                           L.mWeights);
+        createDeviceLocalBufferWithStaging(zerosW.data(), vWSize,
+                                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                           L.vWeights);
 
-        allocBuffer(L.mWeights, inSize * outSize);
-        allocBuffer(L.vWeights, inSize * outSize);
-        allocBuffer(L.mBiases, outSize);
-        allocBuffer(L.vBiases, outSize);
+        std::vector<float> zerosB((size_t)outSize, 0.0f);
+        createDeviceLocalBufferWithStaging(zerosB.data(), mBSize,
+                                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                           L.mBiases);
+        createDeviceLocalBufferWithStaging(zerosB.data(), vBSize,
+                                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                           L.vBiases);
     }
 
     uint32_t targetSize = batchSize * layers.back().outSize;
-    createBuffer(targetSize * sizeof(float),
-                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+    createBuffer((VkDeviceSize)targetSize * sizeof(float),
+                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                 VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                  targetBuffer);
 }
 
@@ -777,6 +834,41 @@ void PENNIS::createBuffer(VkDeviceSize size,
         throw std::runtime_error("failed to allocate buffer memory!");
 
     vkBindBufferMemory(device, buf.buffer, buf.memory, 0);
+}
+
+VkCommandBuffer PENNIS::beginSingleTimeCommands()
+{
+    VkCommandBufferAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocInfo.commandPool = commandPool;
+    allocInfo.commandBufferCount = 1;
+
+    VkCommandBuffer commandBuffer;
+    vkAllocateCommandBuffers(device, &allocInfo, &commandBuffer);
+
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+    vkBeginCommandBuffer(commandBuffer, &beginInfo);
+
+    return commandBuffer;
+}
+
+void PENNIS::endSingleTimeCommands(VkCommandBuffer commandBuffer)
+{
+    vkEndCommandBuffer(commandBuffer);
+
+    VkSubmitInfo submitInfo{};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &commandBuffer;
+
+    vkQueueSubmit(computeQueue, 1, &submitInfo, VK_NULL_HANDLE);
+    vkQueueWaitIdle(computeQueue);
+
+    vkFreeCommandBuffers(device, commandPool, 1, &commandBuffer);
 }
 
 uint32_t PENNIS::findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties)

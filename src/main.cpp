@@ -14,7 +14,7 @@ int main()
         std::vector<uint32_t> actTypes = {Tanh, Tanh, Tanh, Tanh, None};
         AdamParams adamParams = {0.9f, 0.999f, 1e-8f, 0.01f};
 
-        PENNIS pennis(50, layerSizes, actTypes, adamParams);
+        PENNIS pennis(64, 50, layerSizes, actTypes, adamParams);
 
         const int epochs = 5000;
         int currentEpoch = 0;

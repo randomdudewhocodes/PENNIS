@@ -63,7 +63,8 @@ public:
     std::vector<float> predict(const std::vector<float>& inputData);
     void printArchitecture();
 
-    PENNIS(const uint32_t batchSize,
+    PENNIS(const uint32_t workgroupSize,
+           const uint32_t batchSize,
            const std::vector<uint32_t>& layerSizes,
            const std::vector<uint32_t>& activationTypes,
            const AdamParams adamParams);
@@ -96,6 +97,7 @@ private:
     VkCommandBuffer computeCommandBuffer;
     VkFence fence;
     
+    uint32_t workgroupSize;
     uint32_t batchSize;
     std::vector<Layer> layers;
     Buffer targetBuffer;

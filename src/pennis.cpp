@@ -23,11 +23,12 @@ void DestroyDebugUtilsMessengerEXT(
         func(instance, debugMessenger, pAllocator);
 }
 
-PENNIS::PENNIS(const uint32_t batchSize,
+PENNIS::PENNIS(const uint32_t workgroupSize,
+               const uint32_t batchSize,
                const std::vector<uint32_t>& layerSizes,
                const std::vector<uint32_t>& activationTypes,
                const AdamParams adamParams)
-    : batchSize(batchSize), adamParams(adamParams)
+    : workgroupSize(workgroupSize), batchSize(batchSize), adamParams(adamParams)
 {
     size_t numLayers = layerSizes.size() - 1;
     layers.resize(numLayers);
@@ -578,18 +579,29 @@ void PENNIS::createComputePipeline(
     VkPipeline& outPipeline)
 {
     auto computeShaderCode = readFile(shaderPath);
-
     VkShaderModule computeShaderModule = createShaderModule(computeShaderCode);
-    
+
+    VkSpecializationMapEntry mapEntry{};
+    mapEntry.constantID = 0;
+    mapEntry.offset     = 0;
+    mapEntry.size       = sizeof(uint32_t);
+
+    VkSpecializationInfo specInfo{};
+    specInfo.mapEntryCount = 1;
+    specInfo.pMapEntries   = &mapEntry;
+    specInfo.dataSize      = sizeof(uint32_t);
+    specInfo.pData         = &workgroupSize;
+
     VkPipelineShaderStageCreateInfo computeShaderStageInfo{};
-    computeShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    computeShaderStageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    computeShaderStageInfo.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    computeShaderStageInfo.stage  = VK_SHADER_STAGE_COMPUTE_BIT;
     computeShaderStageInfo.module = computeShaderModule;
-    computeShaderStageInfo.pName = "main";
+    computeShaderStageInfo.pName  = "main";
+    computeShaderStageInfo.pSpecializationInfo = &specInfo;
 
     VkPushConstantRange pushRange{};
     pushRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    pushRange.offset = 0;
+    pushRange.offset     = 0;
 
     uint32_t size;
     VkDescriptorSetLayout layout;
@@ -602,19 +614,19 @@ void PENNIS::createComputePipeline(
     pushRange.size = size;
 
     VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
-    pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    pipelineLayoutInfo.setLayoutCount = 1;
-    pipelineLayoutInfo.pSetLayouts = &layout;
+    pipelineLayoutInfo.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pipelineLayoutInfo.setLayoutCount         = 1;
+    pipelineLayoutInfo.pSetLayouts            = &layout;
     pipelineLayoutInfo.pushConstantRangeCount = 1;
-    pipelineLayoutInfo.pPushConstantRanges = &pushRange;
+    pipelineLayoutInfo.pPushConstantRanges    = &pushRange;
 
     if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &outPipelineLayout) != VK_SUCCESS)
         throw std::runtime_error("failed to create compute pipeline layout!");
 
     VkComputePipelineCreateInfo pipelineInfo{};
-    pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    pipelineInfo.sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
     pipelineInfo.layout = outPipelineLayout;
-    pipelineInfo.stage = computeShaderStageInfo;
+    pipelineInfo.stage  = computeShaderStageInfo;
 
     if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &outPipeline) != VK_SUCCESS)
         throw std::runtime_error("failed to create compute pipeline!");
@@ -1019,7 +1031,7 @@ void PENNIS::recordForwardCommandBuffer()
         Push push = { L.inSize, L.outSize, 1, L.actType };
         vkCmdPushConstants(computeCommandBuffer, forwardPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
 
-        uint32_t groups = (L.outSize - 1) / 256 + 1;
+        uint32_t groups = (L.outSize - 1) / workgroupSize + 1;
         vkCmdDispatch(computeCommandBuffer, groups, 1, 1);
 
         if (i + 1 < layers.size())
@@ -1057,7 +1069,7 @@ void PENNIS::recordForwardBatchCommandBuffer()
         Push push = { L.inSize, L.outSize, batchSize, L.actType };
         vkCmdPushConstants(computeCommandBuffer, forwardPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
 
-        uint32_t groups = (L.outSize * batchSize - 1) / 256 + 1;
+        uint32_t groups = (L.outSize * batchSize - 1) / workgroupSize + 1;
         vkCmdDispatch(computeCommandBuffer, groups, 1, 1);
 
         if (i + 1 < layers.size())
@@ -1099,7 +1111,7 @@ void PENNIS::recordBackpropCommandBuffer()
         push = { L.inSize, L.outSize, batchSize, L.actType, isOutput ? 1u : 0u, 0u };
         vkCmdPushConstants(computeCommandBuffer, backpropPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
 
-        uint32_t groups = (L.outSize * batchSize - 1) / 256 + 1;
+        uint32_t groups = (L.outSize * batchSize - 1) / workgroupSize + 1;
         vkCmdDispatch(computeCommandBuffer, groups, 1, 1);
 
         {
@@ -1119,7 +1131,7 @@ void PENNIS::recordBackpropCommandBuffer()
         push.phase = 1u;
         vkCmdPushConstants(computeCommandBuffer, backpropPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
 
-        groups = (L.inSize * batchSize - 1) / 256 + 1;
+        groups = (L.inSize * batchSize - 1) / workgroupSize + 1;
         vkCmdDispatch(computeCommandBuffer, groups, 1, 1);
 
         if (i > 0)
@@ -1165,7 +1177,7 @@ void PENNIS::recordReduceCommandBuffer()
         push.size = L.inSize * L.outSize;
         vkCmdPushConstants(computeCommandBuffer, reducePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
 
-        groups = (L.inSize * L.outSize - 1) / 256 + 1;
+        groups = (L.inSize * L.outSize - 1) / workgroupSize + 1;
         vkCmdDispatch(computeCommandBuffer, groups, 1, 1);
 
         vkCmdBindDescriptorSets(
@@ -1179,7 +1191,7 @@ void PENNIS::recordReduceCommandBuffer()
         push.size = L.outSize;
         vkCmdPushConstants(computeCommandBuffer, reducePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
 
-        groups = (L.outSize - 1) / 256 + 1;
+        groups = (L.outSize - 1) / workgroupSize + 1;
         vkCmdDispatch(computeCommandBuffer, groups, 1, 1);
 
         {
@@ -1219,7 +1231,7 @@ void PENNIS::recordAdamCommandBuffer()
         push.size = L.inSize * L.outSize;
         vkCmdPushConstants(computeCommandBuffer, adamPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
 
-        groups = (L.inSize * L.outSize - 1) / 256 + 1;
+        groups = (L.inSize * L.outSize - 1) / workgroupSize + 1;
         vkCmdDispatch(computeCommandBuffer, groups, 1, 1);
 
         vkCmdBindDescriptorSets(
@@ -1233,7 +1245,7 @@ void PENNIS::recordAdamCommandBuffer()
         push.size = L.outSize;
         vkCmdPushConstants(computeCommandBuffer, adamPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
 
-        groups = (L.outSize - 1) / 256 + 1;
+        groups = (L.outSize - 1) / workgroupSize + 1;
         vkCmdDispatch(computeCommandBuffer, groups, 1, 1);
 
         {

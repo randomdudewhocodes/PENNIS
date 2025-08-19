@@ -680,14 +680,26 @@ void PENNIS::createShaderStorageBuffers()
         VkDeviceSize vBSize      = biasesSize;
 
         std::vector<float> initWeights((size_t)inSize * outSize);
-        for (size_t j = 0; j < initWeights.size(); ++j) initWeights[j] = dist(gen);
+
+        float gain;
+        switch (L.actType)
+        {
+            case ReLU:    gain = sqrtf(2.0f); break;
+            case Sigmoid: gain = 1.0f; break;
+            case Tanh:    gain = 5.0f / 3.0f; break;
+            default:      gain = 1.0f; break;
+        }
+
+        float stddev = gain * std::sqrt(2.0f / (L.inSize + L.outSize));
+        std::normal_distribution<float> gaussDist(0.0f, stddev);
+
+        for (size_t j = 0; j < initWeights.size(); ++j) initWeights[j] = gaussDist(gen);
 
         createDeviceLocalBufferWithStaging(initWeights.data(), weightsSize,
                                            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                                            L.weights);
 
-        std::vector<float> initBiases((size_t)outSize);
-        for (size_t j = 0; j < initBiases.size(); ++j) initBiases[j] = dist(gen);
+        std::vector<float> initBiases((size_t)outSize, 0.01f);
 
         createDeviceLocalBufferWithStaging(initBiases.data(), biasesSize,
                                            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,

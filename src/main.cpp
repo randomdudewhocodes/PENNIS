@@ -10,11 +10,11 @@ int main()
 {
     try
     {
-        std::vector<uint32_t> layerSizes = {1, 4, 4, 4, 4, 1};
-        std::vector<uint32_t> actTypes = {Tanh, Tanh, Tanh, Tanh, None};
+        std::vector<uint32_t> layerSizes = {1, 16, 16, 1};
+        std::vector<uint32_t> actTypes = {Tanh, Tanh, None};
         AdamParams adamParams = {0.9f, 0.999f, 1e-8f, 0.01f};
 
-        PENNIS pennis(64, 50, layerSizes, actTypes, adamParams);
+        PENNIS pennis(1, 50, layerSizes, actTypes, adamParams);
 
         const int epochs = 5000;
         int currentEpoch = 0;
@@ -50,12 +50,6 @@ int main()
 
         while (!WindowShouldClose())
         {
-            for (int i = 0; i < 100 && currentEpoch < epochs; i++)
-            {
-                pennis.train();
-                currentEpoch++;
-            }
-
             for (int px = 0; px < screenWidth; px++)
             {
                 float x = (float)px / scaleX;
@@ -98,6 +92,12 @@ int main()
             DrawText(TextFormat("Epoch: %d / %d", currentEpoch, epochs), 10, 10, 20, BLACK);
 
             EndDrawing();
+
+            for (int i = 0; i < 50 && currentEpoch < epochs; i++)
+            {
+                pennis.train();
+                currentEpoch++;
+            }
         }
 
         CloseWindow();

@@ -7,17 +7,76 @@
 #include <cmath>
 #include <cstdint>
 #include <iostream>
-
 #include "stb_image.h"
+#include <omp.h>
 
 static inline float clamp01(float x) { return x < 0.f ? 0.f : (x > 1.f ? 1.f : x); }
 
-int main() {
-    try {
+struct FourierFeatureGenerator
+{
+    int inputDim;
+    int numBands;
+    float sigma;
+    bool includeInput;
+    std::vector<float> B;
+
+    FourierFeatureGenerator(int inputDim, int numBands, float sigma, bool includeInput, std::mt19937 &rng)
+        : inputDim(inputDim), numBands(numBands), sigma(sigma), includeInput(includeInput), B(size_t(numBands) * size_t(inputDim))
+    {
+        int nthreads = omp_get_max_threads();
+        std::vector<uint32_t> seeds(nthreads);
+        for (int t = 0; t < nthreads; ++t) seeds[t] = rng();
+        size_t total = B.size();
+        #pragma omp parallel for
+        for (size_t i = 0; i < total; ++i) {
+            int tid = omp_get_thread_num();
+            std::mt19937 local((uint32_t)(seeds[tid] + (uint32_t)i));
+            std::normal_distribution<float> nd(0.0f, sigma);
+            B[i] = nd(local);
+        }
+    }
+
+    int outputDim() const { return (includeInput ? inputDim : 0) + 2 * numBands; }
+
+    std::vector<float> transform(const std::vector<float>& coords) const
+    {
+        if (coords.size() % inputDim != 0) throw std::runtime_error("coords size not divisible by inputDim");
+        const size_t N = coords.size() / inputDim;
+        const int outD = outputDim();
+        std::vector<float> out(N * outD);
+        const float two_pi = 2.0f * 3.14159265358979323846f;
+        #pragma omp parallel for
+        for (size_t p = 0; p < N; ++p) {
+            const float* x = &coords[p * inputDim];
+            size_t base = p * outD;
+            size_t idx = base;
+            if (includeInput)
+            {
+                for (int d = 0; d < inputDim; ++d) out[idx++] = x[d];
+            }
+            for (int j = 0; j < numBands; ++j)
+            {
+                const float* Bj = &B[size_t(j) * size_t(inputDim)];
+                float proj = 0.0f;
+                for (int d = 0; d < inputDim; ++d) proj += Bj[d] * x[d];
+                float angle = two_pi * proj;
+                out[idx++] = std::sin(angle);
+                out[idx++] = std::cos(angle);
+            }
+        }
+        return out;
+    }
+};
+
+int main()
+{
+    try
+    {
         int width = 0, height = 0, channels = 0;
         const int desired_channels = 4;
         unsigned char* data = stbi_load("src/examples/image.jpg", &width, &height, &channels, desired_channels);
-        if (!data) {
+        if (!data)
+        {
             std::cerr << "Failed to load image.jpg\n";
             return EXIT_FAILURE;
         }
@@ -37,7 +96,29 @@ int main() {
         const int      epochs        = 5000;
 
         std::mt19937 rng{ std::random_device{}() };
-        std::uniform_int_distribution<int> dist(0, numSamples - 1);
+
+        std::vector<float> coords(numPixels * 2);
+        #pragma omp parallel for
+        for (int y = 0; y < height; ++y)
+        {
+            for (int x = 0; x < width; ++x)
+            {
+                const int p = y * width + x;
+                coords[p * 2 + 0] = 2.0f * float(x) / width - 1.0f;
+                coords[p * 2 + 1] = 2.0f * float(y) / height - 1.0f;
+            }
+        }
+
+        const int inputDim = 2;
+        const int numBands = 256;
+        const float sigma = 10.0f;
+        const bool includeInput = true;
+        FourierFeatureGenerator ff(inputDim, numBands, sigma, includeInput, rng);
+
+        std::vector<float> coordsFF = ff.transform(coords);
+        const int mappedInputDim = ff.outputDim();
+
+        layerSizes[0] = (uint32_t)mappedInputDim;
 
         PENNIS net(workgroupSize, batchSize, layerSizes, actTypes, adamParams);
 
@@ -50,15 +131,6 @@ int main() {
         UnloadImage(blank);
 
         std::vector<unsigned char> preview(width * height * channels, 0);
-
-        std::vector<float> coords(numPixels * 2);
-        for (int y = 0; y < height; ++y) {
-            for (int x = 0; x < width; ++x) {
-                const int p = y * width + x;
-                coords[p * 2 + 0] = (2.0 * float(x) / width - 1.0f) * 1.0f;
-                coords[p * 2 + 1] = (2.0 * float(y) / height - 1.0f) * 1.0f;
-            }
-        }
 
         std::vector<int> previewOrder(numPixels);
         for (int i = 0; i < numPixels; ++i) previewOrder[i] = i;
@@ -73,19 +145,25 @@ int main() {
 
         float lastLoss = 0.0f;
 
-        while (!WindowShouldClose()) {
-            for (int s = 0; s < trainStepsPerFrame && currentEpoch < epochs; ++s) {
-                std::vector<float> in(batchSize * 2);
+        std::uniform_int_distribution<int> dist(0, numSamples - 1);
+
+        while (!WindowShouldClose())
+        {
+            for (int s = 0; s < trainStepsPerFrame && currentEpoch < epochs; ++s)
+            {
+                std::vector<int> ks(batchSize);
+                for (int j = 0; j < batchSize; ++j) ks[j] = dist(rng);
+                std::vector<float> in(batchSize * mappedInputDim);
                 std::vector<float> tgt(batchSize * channels);
-
-                for (int j = 0; j < batchSize; ++j) {
-                    int k = dist(rng);
-                    in[j * 2 + 0] = coords[k * 2 + 0];
-                    in[j * 2 + 1] = coords[k * 2 + 1];
-                    for (int c = 0; c < channels; ++c)
-                        tgt[j * channels + c] = float(imageData[k * channels + c]) / 255.0f;
+                #pragma omp parallel for
+                for (int j = 0; j < batchSize; ++j)
+                {
+                    int k = ks[j];
+                    const int srcOffset = k * mappedInputDim;
+                    const int dstOffset = j * mappedInputDim;
+                    std::copy_n(coordsFF.begin() + srcOffset, mappedInputDim, in.begin() + dstOffset);
+                    for (int c = 0; c < channels; ++c) tgt[j * channels + c] = float(imageData[k * channels + c]) / 255.0f;
                 }
-
                 net.uploadInputs(in);
                 net.uploadTargets(tgt);
                 net.train();
@@ -94,28 +172,41 @@ int main() {
 
             lastLoss = net.getLoss();
 
-            if (currentEpoch < epochs) {
+            if (currentEpoch < epochs)
+            {
                 int remaining = std::min(previewChunk, numPixels - previewCursor);
-                for (int i = 0; i < remaining; ++i) {
+                for (int i = 0; i < remaining; ++i)
+                {
                     int p = previewOrder[previewCursor + i];
-                    std::vector<float> out = net.predict({ coords[p * 2 + 0], coords[p * 2 + 1] });
+                    int srcOffset = p * mappedInputDim;
+                    std::vector<float> inp(mappedInputDim);
+                    std::copy_n(coordsFF.begin() + srcOffset, mappedInputDim, inp.begin());
+                    std::vector<float> out = net.predict(inp);
                     int idx = p * channels;
-                    for (int c = 0; c < channels; ++c) {
+                    for (int c = 0; c < channels; ++c)
+                    {
                         float v = clamp01(out[c]);
                         preview[idx + c] = static_cast<unsigned char>(std::lrint(v * 255.0f));
                     }
                 }
                 previewCursor += remaining;
-                if (previewCursor >= numPixels) {
+                if (previewCursor >= numPixels)
+                {
                     std::shuffle(previewOrder.begin(), previewOrder.end(), rng);
                     previewCursor = 0;
                 }
-            } else if (!saved) {
-                // training finished -> render full texture
-                for (int p = 0; p < numPixels; ++p) {
-                    std::vector<float> out = net.predict({ coords[p * 2 + 0], coords[p * 2 + 1] });
+            }
+            else if (!saved)
+            {
+                for (int p = 0; p < numPixels; ++p)
+                {
+                    int srcOffset = p * mappedInputDim;
+                    std::vector<float> inp(mappedInputDim);
+                    std::copy_n(coordsFF.begin() + srcOffset, mappedInputDim, inp.begin());
+                    std::vector<float> out = net.predict(inp);
                     int idx = p * channels;
-                    for (int c = 0; c < channels; ++c) {
+                    for (int c = 0; c < channels; ++c)
+                    {
                         float v = clamp01(out[c]);
                         preview[idx + c] = static_cast<unsigned char>(std::lrint(v * 255.0f));
                     }
@@ -137,24 +228,30 @@ int main() {
 
             DrawRectangle(8, 8, 360, 70, Fade(BLACK, 0.6f));
             DrawText(TextFormat("Epoch: %d / %d", currentEpoch, epochs), 16, 16, 18, RAYWHITE);
-            DrawText(TextFormat("Loss:  %.6f", lastLoss),              16, 38, 18, RAYWHITE);
-            DrawText("ESC: save & quit",                               16, 58, 18, RAYWHITE);
+            DrawText(TextFormat("Loss:  %.6f", lastLoss),                16, 38, 18, RAYWHITE);
+            DrawText("ESC: save & quit",                                 16, 58, 18, RAYWHITE);
             EndDrawing();
         }
 
         UnloadTexture(tex);
         CloseWindow();
 
-        if (!saved) {
-            try {
+        if (!saved)
+        {
+            try
+            {
                 const char* filename = "image_model.pnn";
                 net.saveArchitecture(filename);
                 std::cout << "Saved model at exit to: " << filename << std::endl;
-            } catch (const std::exception& e) {
-                std::cerr << "Failed to save model at exit: " << e.what() << std::endl;
+            }
+            catch (const std::exception& e)
+            {
+                std::cerr << "Failed to save model: " << e.what() << std::endl;
             }
         }
-    } catch (const std::exception& e) {
+    }
+    catch (const std::exception& e)
+    {
         std::cerr << "[Fatal] " << e.what() << std::endl;
         return EXIT_FAILURE;
     }

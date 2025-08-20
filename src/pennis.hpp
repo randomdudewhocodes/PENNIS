@@ -61,6 +61,7 @@ public:
     void train();
     void runForward();
     std::vector<float> predict(const std::vector<float>& inputData);
+    std::vector<float> predictBatch(const std::vector<float>& inputData);
     void printArchitecture();
     void saveArchitecture(const std::string& filename);
     PENNIS* loadFromFile(const std::string& filename);

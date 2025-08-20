@@ -14,7 +14,7 @@ int main()
         std::vector<uint32_t> actTypes = {Tanh, Tanh, None};
         AdamParams adamParams = {0.9f, 0.999f, 1e-8f, 0.005f, 0.01f};
 
-        PENNIS pennis(1, 50, layerSizes, actTypes, adamParams);
+        PENNIS pennis(64, 50, layerSizes, actTypes, adamParams);
 
         const int epochs = 5000;
         int currentEpoch = 0;
@@ -106,7 +106,7 @@ int main()
                 {
                     try
                     {
-                        const char* filename = "trained_model.pnn";
+                        const char* filename = "sine_model.pnn";
                         pennis.saveArchitecture(filename);
                         std::cout << "Training complete. Saved model to: " << filename << std::endl;
                     }
@@ -127,7 +127,7 @@ int main()
         {
             try
             {
-                const char* filename = "trained_model.pnn";
+                const char* filename = "sine_model.pnn";
                 pennis.saveArchitecture(filename);
                 std::cout << "Saved model at exit to: " << filename << std::endl;
             }

@@ -327,6 +327,43 @@ std::vector<float> PENNIS::predict(const std::vector<float>& inputData)
     return output;
 }
 
+std::vector<float> PENNIS::predictBatch(const std::vector<float>& inputData)
+{
+    if (layers.empty()) return {};
+
+    Layer& inLayer = layers.front();
+    uint32_t inSize = inLayer.inSize;
+    uint32_t outSize = layers.back().outSize;
+    uint32_t expectedSize = batchSize * inSize;
+    if (inputData.size() != expectedSize)
+        throw std::runtime_error("predictBatch: inputData.size() != batchSize * inSize");
+
+    uploadInputs(inputData);
+
+    vkResetCommandBuffer(computeCommandBuffer, 0);
+
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+    if (vkBeginCommandBuffer(computeCommandBuffer, &beginInfo) != VK_SUCCESS)
+        throw std::runtime_error("failed to begin recording compute command buffer!");
+
+    recordForwardBatchCommandBuffer();
+
+    if (vkEndCommandBuffer(computeCommandBuffer) != VK_SUCCESS)
+        throw std::runtime_error("failed to end recording compute command buffer!");
+
+    computeSubmission();
+
+    Layer& outLayer = layers.back();
+    uint32_t totalOutputSize = batchSize * outSize;
+    std::vector<float> output(totalOutputSize);
+    readbackFromDeviceBuffer(outLayer.output, output.data(), (VkDeviceSize)totalOutputSize * sizeof(float));
+
+    return output;
+}
+
 void PENNIS::saveArchitecture(const std::string& filename)
 {
     std::ofstream out(filename, std::ios::binary);

@@ -62,6 +62,8 @@ public:
     void runForward();
     std::vector<float> predict(const std::vector<float>& inputData);
     void printArchitecture();
+    void saveArchitecture(const std::string& filename);
+    PENNIS* loadFromFile(const std::string& filename);
 
     PENNIS(const uint32_t workgroupSize,
            const uint32_t batchSize,

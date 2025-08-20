@@ -12,12 +12,13 @@ int main()
     {
         std::vector<uint32_t> layerSizes = {1, 16, 16, 1};
         std::vector<uint32_t> actTypes = {Tanh, Tanh, None};
-        AdamParams adamParams = {0.9f, 0.999f, 1e-8f, 0.01f};
+        AdamParams adamParams = {0.9f, 0.999f, 1e-8f, 0.005f, 0.01f};
 
         PENNIS pennis(1, 50, layerSizes, actTypes, adamParams);
 
         const int epochs = 5000;
         int currentEpoch = 0;
+        bool saved = false;
 
         std::vector<float> trainInput, trainTarget;
         for (int i = 0; i < 50; i++)
@@ -97,10 +98,39 @@ int main()
             {
                 pennis.train();
                 currentEpoch++;
+
+                if (currentEpoch >= epochs && !saved)
+                {
+                    try
+                    {
+                        const char* filename = "trained_model.pnn";
+                        pennis.saveArchitecture(filename);
+                        std::cout << "Training complete. Saved model to: " << filename << std::endl;
+                    }
+                    catch (const std::exception& e)
+                    {
+                        std::cerr << "Failed to save model: " << e.what() << std::endl;
+                    }
+                    saved = true;
+                }
             }
         }
 
         CloseWindow();
+
+        if (!saved)
+        {
+            try
+            {
+                const char* filename = "trained_model.pnn";
+                pennis.saveArchitecture(filename);
+                std::cout << "Saved model at exit to: " << filename << std::endl;
+            }
+            catch (const std::exception& e)
+            {
+                std::cerr << "Failed to save model at exit: " << e.what() << std::endl;
+            }
+        }
     }
     catch (const std::exception& e)
     {

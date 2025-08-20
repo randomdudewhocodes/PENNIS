@@ -29,6 +29,7 @@ float dActivate(float x)
         case 3:
             float t = tanh(x);
             return 1 - t * t;
+        case 4: return cos(x);
         default: return 1;
     }
 }

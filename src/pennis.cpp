@@ -505,6 +505,7 @@ const char* activationName(uint32_t activationType)
         case ReLU: return "ReLU";
         case Sigmoid: return "Sigmoid";
         case Tanh: return "Tanh";
+        case Sine: return "Sine";
         default: return "None";
     }
 }
@@ -830,7 +831,6 @@ void PENNIS::createShaderStorageBuffers()
 
     std::random_device rd;
     std::mt19937 gen(rd());
-    std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
 
     for (size_t i = 0; i < numLayers; i++)
     {
@@ -857,25 +857,62 @@ void PENNIS::createShaderStorageBuffers()
 
         std::vector<float> initWeights((size_t)inSize * outSize);
 
-        float gain;
-        switch (L.actType)
+        if (L.actType == Sine)
         {
-            case ReLU:    gain = sqrtf(2.0f); break;
-            case Sigmoid: gain = 1.0f; break;
-            case Tanh:    gain = 5.0f / 3.0f; break;
-            default:      gain = 1.0f; break;
+            const float omega0 = 30.0f;
+
+            std::uniform_real_distribution<float> sirenDist;
+
+            if (i == 0)
+            {
+                float limit = 1.0f / static_cast<float>(inSize);
+                sirenDist = std::uniform_real_distribution<float>(-limit, limit);
+            }
+            else
+            {
+                float limit = std::sqrt(6.0f / static_cast<float>(inSize)) / omega0;
+                sirenDist = std::uniform_real_distribution<float>(-limit, limit);
+            }
+
+            for (size_t j = 0; j < initWeights.size(); ++j)
+                initWeights[j] = sirenDist(gen);
         }
+        else
+        {
+            float stddev;
 
-        float stddev = gain * std::sqrt(2.0f / (L.inSize + L.outSize));
-        std::normal_distribution<float> gaussDist(0.0f, stddev);
+            switch (L.actType)
+            {
+                case ReLU:
+                    stddev = std::sqrt(2.0f / L.inSize);
+                    break;
 
-        for (size_t j = 0; j < initWeights.size(); ++j) initWeights[j] = gaussDist(gen);
+                case Sigmoid:
+                    stddev = std::sqrt(2.0f / (L.inSize + L.outSize));
+                    break;
+
+                case Tanh:
+                    stddev = (5.0f / 3.0f) * std::sqrt(2.0f / (L.inSize + L.outSize));
+                    break;
+
+                default:
+                    stddev = std::sqrt(2.0f / (L.inSize + L.outSize));
+                    break;
+            }
+
+            std::normal_distribution<float> gaussDist(0.0f, stddev);
+            for (size_t j = 0; j < initWeights.size(); ++j)
+                initWeights[j] = gaussDist(gen);
+        }
 
         createDeviceLocalBufferWithStaging(initWeights.data(), weightsSize,
                                            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                                            L.weights);
 
-        std::vector<float> initBiases((size_t)outSize, 0.01f);
+        std::vector<float> initBiases((size_t)outSize, L.actType == ReLU ? 0.01f : 0.0f);
+
+        std::uniform_real_distribution<float> dist(-3.141593f, 3.141593f);
+        for (size_t j = 0; j < initBiases.size(); ++j) initBiases[j] = dist(gen);
 
         createDeviceLocalBufferWithStaging(initBiases.data(), biasesSize,
                                            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,

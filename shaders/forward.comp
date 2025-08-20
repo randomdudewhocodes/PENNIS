@@ -20,6 +20,7 @@ float activate(float x)
         case 1: return max(x, 0);
         case 2: return 1 / (1 + exp(-x));
         case 3: return tanh(x);
+        case 4: return sin(x);
         default: return x;
     }
 }

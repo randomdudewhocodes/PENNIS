@@ -27,7 +27,7 @@ struct QueueFamilyIndices
     bool isComplete() { return computeFamily.has_value(); }
 };
 
-enum ActivationFunction { None, ReLU, Sigmoid, Tanh };
+enum ActivationFunction { None, ReLU, Sigmoid, Tanh, Sine };
 
 struct Buffer
 {

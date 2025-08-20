@@ -28,9 +28,9 @@ int main() {
         std::vector<unsigned char> imageData(data, data + (numPixels * channels));
         stbi_image_free(data);
 
-        std::vector<uint32_t> layerSizes = { 2, 128, 128, 128, 128, 128, 128, 128, 128, (uint32_t)channels };
-        std::vector<uint32_t> actTypes   = { ReLU, ReLU, ReLU, ReLU, ReLU, ReLU, ReLU, ReLU, ReLU, Sigmoid };
-        AdamParams adamParams = { 0.9f, 0.999f, 1e-8f, 0.001f, 0.01f };
+        std::vector<uint32_t> layerSizes = { 2, 256, 256, 256, 256, 256, (uint32_t)channels };
+        std::vector<uint32_t> actTypes   = { Sine, Sine, Sine, Sine, Sine, None };
+        AdamParams adamParams = { 0.9f, 0.999f, 1e-8f, 0.001f, 0.001f };
 
         const uint32_t workgroupSize = 512;
         const int      batchSize     = 256;
@@ -41,10 +41,9 @@ int main() {
 
         PENNIS net(workgroupSize, batchSize, layerSizes, actTypes, adamParams);
 
-        int winH = 1080;
-        int winW = int(1080.0f * (float)width / (float)height);
-        InitWindow(winW, winH, "Image Fitting (progressive)");
-        SetTargetFPS(60);
+        int winH = 600;
+        int winW = int(600.0f * (float)width / (float)height);
+        InitWindow(winW, winH, "NN Training Visualizer");
 
         Image blank = GenImageColor(width, height, BLANK);
         Texture2D tex = LoadTextureFromImage(blank);
@@ -56,8 +55,8 @@ int main() {
         for (int y = 0; y < height; ++y) {
             for (int x = 0; x < width; ++x) {
                 const int p = y * width + x;
-                coords[p * 2 + 0] = 2.0 * float(x) / width - 1.0f;
-                coords[p * 2 + 1] = 2.0 * float(y) / height - 1.0f;
+                coords[p * 2 + 0] = (2.0 * float(x) / width - 1.0f) * 30.0f;
+                coords[p * 2 + 1] = (2.0 * float(y) / height - 1.0f) * 30.0f;
             }
         }
 

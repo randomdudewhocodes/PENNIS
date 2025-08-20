@@ -10,28 +10,39 @@ find_program(GLSLC_EXECUTABLE glslc REQUIRED)
 
 # ---------------- Shaders ----------------
 function(add_shaders TARGET_NAME)
+    # If caller passed shader files, use them. Otherwise glob all shader files in shaders/
     set(SHADER_SOURCE_FILES ${ARGN})
 
     list(LENGTH SHADER_SOURCE_FILES FILE_COUNT)
     if(FILE_COUNT EQUAL 0)
-        message(FATAL_ERROR "Cannot create a shaders target without any source files")
+        # Automatically find common shader extensions in the project's shaders/ directory
+        file(GLOB SHADER_SOURCE_FILES
+            "${CMAKE_SOURCE_DIR}/shaders/*.comp"
+        )
+    endif()
+
+    if(NOT SHADER_SOURCE_FILES)
+        message(FATAL_ERROR "Cannot create a shaders target: no shader source files found")
     endif()
 
     set(SHADER_COMMANDS)
     set(SHADER_PRODUCTS)
-    set(SHADER_OUTPUT_DIR "${CMAKE_SOURCE_DIR}/shaders")
+    set(SHADER_OUTPUT_DIR "${CMAKE_SOURCE_DIR}/shaders")  # keep outputs next to sources (same as original)
 
     foreach(SHADER_SOURCE IN LISTS SHADER_SOURCE_FILES)
-        get_filename_component(SHADER_SOURCE "${SHADER_SOURCE}" ABSOLUTE)
-        get_filename_component(SHADER_BASENAME "${SHADER_SOURCE}" NAME_WE)
+        # Normalize to absolute path
+        get_filename_component(SHADER_SOURCE_ABS "${SHADER_SOURCE}" ABSOLUTE)
 
+        # Human-friendly relative path for echoing
+        file(RELATIVE_PATH SHADER_SOURCE_REL "${CMAKE_SOURCE_DIR}" "${SHADER_SOURCE_ABS}")
+
+        get_filename_component(SHADER_BASENAME "${SHADER_SOURCE_ABS}" NAME_WE)
         set(SHADER_OUTPUT_FILE "${SHADER_OUTPUT_DIR}/${SHADER_BASENAME}.spv")
 
+        # Print which file is being compiled, then invoke glslc to produce .spv
         list(APPEND SHADER_COMMANDS
-            COMMAND ${GLSLC_EXECUTABLE}
-            "${SHADER_SOURCE}"
-            "-o"
-            "${SHADER_OUTPUT_FILE}"
+            COMMAND ${CMAKE_COMMAND} -E echo "Compiling: ${SHADER_SOURCE_REL}"
+            COMMAND ${GLSLC_EXECUTABLE} "${SHADER_SOURCE_ABS}" -o "${SHADER_OUTPUT_FILE}"
         )
 
         list(APPEND SHADER_PRODUCTS "${SHADER_OUTPUT_FILE}")
@@ -46,13 +57,7 @@ function(add_shaders TARGET_NAME)
     )
 endfunction()
 
-# Compile shader files
-add_shaders(shaders
-    shaders/forward.comp
-    shaders/backprop.comp
-    shaders/reduce.comp
-    shaders/adam.comp
-)
+add_shaders(shaders)
 
 # ---------------- Raylib ----------------
 add_subdirectory("${CMAKE_SOURCE_DIR}/raylib" ${CMAKE_BINARY_DIR}/raylib)

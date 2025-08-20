@@ -865,7 +865,7 @@ void PENNIS::createShaderStorageBuffers()
 
             if (i == 0)
             {
-                float limit = 1.0f / static_cast<float>(inSize);
+                float limit = omega0 / static_cast<float>(inSize);
                 sirenDist = std::uniform_real_distribution<float>(-limit, limit);
             }
             else

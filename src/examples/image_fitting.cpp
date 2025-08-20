@@ -55,8 +55,8 @@ int main() {
         for (int y = 0; y < height; ++y) {
             for (int x = 0; x < width; ++x) {
                 const int p = y * width + x;
-                coords[p * 2 + 0] = (2.0 * float(x) / width - 1.0f) * 30.0f;
-                coords[p * 2 + 1] = (2.0 * float(y) / height - 1.0f) * 30.0f;
+                coords[p * 2 + 0] = (2.0 * float(x) / width - 1.0f) * 1.0f;
+                coords[p * 2 + 1] = (2.0 * float(y) / height - 1.0f) * 1.0f;
             }
         }
 

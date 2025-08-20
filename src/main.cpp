@@ -49,6 +49,8 @@ int main()
             targetOutputs[px] = sinf(x);
         }
 
+        float loss = 0.0f;
+
         while (!WindowShouldClose())
         {
             for (int px = 0; px < screenWidth; px++)
@@ -91,6 +93,7 @@ int main()
             }
 
             DrawText(TextFormat("Epoch: %d / %d", currentEpoch, epochs), 10, 10, 20, BLACK);
+            DrawText(TextFormat("Loss: %f", loss), 10, 40, 20, BLACK);
 
             EndDrawing();
 
@@ -114,6 +117,8 @@ int main()
                     saved = true;
                 }
             }
+
+            loss = pennis.getLoss();
         }
 
         CloseWindow();

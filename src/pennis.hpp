@@ -64,6 +64,7 @@ public:
     void printArchitecture();
     void saveArchitecture(const std::string& filename);
     PENNIS* loadFromFile(const std::string& filename);
+    float getLoss();
 
     PENNIS(const uint32_t workgroupSize,
            const uint32_t batchSize,

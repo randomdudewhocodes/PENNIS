@@ -474,25 +474,7 @@ const char* activationName(uint32_t activationType)
 
 void PENNIS::printArchitecture()
 {
-    Layer& outLayer = layers.back();
-    uint32_t totalOutputSize = batchSize * outLayer.outSize;
-
-    std::vector<float> output(totalOutputSize);
-    readbackFromDeviceBuffer(outLayer.output, output.data(), totalOutputSize * sizeof(float));
-
-    std::vector<float> target(totalOutputSize);
-    readbackFromDeviceBuffer(targetBuffer, target.data(), totalOutputSize * sizeof(float));
-
-    float loss = 0.0f;
-    #pragma omp parallel for reduction(+:loss)
-    for (size_t i = 0; i < totalOutputSize; i++)
-    {
-        double diff = output[i] - target[i];
-        loss += diff * diff;
-    }
-    loss /= batchSize;
-
-    std::cout << "\nNeural network architecture: (Loss: " << loss << ")\n";
+    std::cout << "\nNeural network architecture:\n";
 
     for (size_t i = 0; i < layers.size(); i++)
     {
@@ -522,6 +504,29 @@ void PENNIS::printArchitecture()
             std::cout << biases[j] << " ";
         std::cout << "\n\n";
     }
+}
+
+float PENNIS::getLoss()
+{
+    Layer& outLayer = layers.back();
+    uint32_t totalOutputSize = batchSize * outLayer.outSize;
+
+    std::vector<float> output(totalOutputSize);
+    readbackFromDeviceBuffer(outLayer.output, output.data(), totalOutputSize * sizeof(float));
+
+    std::vector<float> target(totalOutputSize);
+    readbackFromDeviceBuffer(targetBuffer, target.data(), totalOutputSize * sizeof(float));
+
+    float loss = 0.0f;
+    #pragma omp parallel for reduction(+:loss)
+    for (size_t i = 0; i < totalOutputSize; i++)
+    {
+        double diff = output[i] - target[i];
+        loss += diff * diff;
+    }
+    loss /= batchSize;
+
+    return loss;
 }
 
 void PENNIS::createInstance()
@@ -908,7 +913,7 @@ void PENNIS::createShaderStorageBuffers()
 
     uint32_t targetSize = batchSize * layers.back().outSize;
     createBuffer((VkDeviceSize)targetSize * sizeof(float),
-                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                  VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                  targetBuffer);
 }

@@ -12,62 +12,6 @@
 
 static inline float clamp01(float x) { return x < 0.f ? 0.f : (x > 1.f ? 1.f : x); }
 
-struct FourierFeatureGenerator
-{
-    int inputDim;
-    int numBands;
-    float sigma;
-    bool includeInput;
-    std::vector<float> B;
-
-    FourierFeatureGenerator(int inputDim, int numBands, float sigma, bool includeInput, std::mt19937 &rng)
-        : inputDim(inputDim), numBands(numBands), sigma(sigma), includeInput(includeInput), B(size_t(numBands) * size_t(inputDim))
-    {
-        int nthreads = omp_get_max_threads();
-        std::vector<uint32_t> seeds(nthreads);
-        for (int t = 0; t < nthreads; ++t) seeds[t] = rng();
-        size_t total = B.size();
-        #pragma omp parallel for
-        for (size_t i = 0; i < total; ++i) {
-            int tid = omp_get_thread_num();
-            std::mt19937 local((uint32_t)(seeds[tid] + (uint32_t)i));
-            std::normal_distribution<float> nd(0.0f, sigma);
-            B[i] = nd(local);
-        }
-    }
-
-    int outputDim() const { return (includeInput ? inputDim : 0) + 2 * numBands; }
-
-    std::vector<float> transform(const std::vector<float>& coords) const
-    {
-        if (coords.size() % inputDim != 0) throw std::runtime_error("coords size not divisible by inputDim");
-        const size_t N = coords.size() / inputDim;
-        const int outD = outputDim();
-        std::vector<float> out(N * outD);
-        const float two_pi = 2.0f * 3.14159265358979323846f;
-        #pragma omp parallel for
-        for (size_t p = 0; p < N; ++p) {
-            const float* x = &coords[p * inputDim];
-            size_t base = p * outD;
-            size_t idx = base;
-            if (includeInput)
-            {
-                for (int d = 0; d < inputDim; ++d) out[idx++] = x[d];
-            }
-            for (int j = 0; j < numBands; ++j)
-            {
-                const float* Bj = &B[size_t(j) * size_t(inputDim)];
-                float proj = 0.0f;
-                for (int d = 0; d < inputDim; ++d) proj += Bj[d] * x[d];
-                float angle = two_pi * proj;
-                out[idx++] = std::sin(angle);
-                out[idx++] = std::cos(angle);
-            }
-        }
-        return out;
-    }
-};
-
 int main()
 {
     try
@@ -87,7 +31,14 @@ int main()
         std::vector<unsigned char> imageData(data, data + (numPixels * channels));
         stbi_image_free(data);
 
-        std::vector<uint32_t> layerSizes = { 2, 256, 256, 256, 256, 256, (uint32_t)channels };
+        const int inputDim = 2; // original coordinate dimension
+
+        // Set Fourier feature choice here: 0 = disabled, >0 = number of bands
+        const int fourierBands = 256; // change to 0 to disable
+        const float fourierSigma = 10.0f;
+        const bool includeInput = true;
+
+        std::vector<uint32_t> layerSizes = { (uint32_t)inputDim, 256, 256, 256, 256, 256, (uint32_t)channels };
         std::vector<uint32_t> actTypes   = { Sine, Sine, Sine, Sine, Sine, None };
         AdamParams adamParams = { 0.9f, 0.999f, 1e-8f, 0.001f, 0.001f };
 
@@ -97,30 +48,20 @@ int main()
 
         std::mt19937 rng{ std::random_device{}() };
 
-        std::vector<float> coords(numPixels * 2);
+        std::vector<float> coords(numPixels * inputDim);
         #pragma omp parallel for
         for (int y = 0; y < height; ++y)
         {
             for (int x = 0; x < width; ++x)
             {
                 const int p = y * width + x;
-                coords[p * 2 + 0] = 2.0f * float(x) / width - 1.0f;
-                coords[p * 2 + 1] = 2.0f * float(y) / height - 1.0f;
+                coords[p * inputDim + 0] = 2.0f * float(x) / width - 1.0f;
+                coords[p * inputDim + 1] = 2.0f * float(y) / height - 1.0f;
             }
         }
 
-        const int inputDim = 2;
-        const int numBands = 256;
-        const float sigma = 10.0f;
-        const bool includeInput = true;
-        FourierFeatureGenerator ff(inputDim, numBands, sigma, includeInput, rng);
-
-        std::vector<float> coordsFF = ff.transform(coords);
-        const int mappedInputDim = ff.outputDim();
-
-        layerSizes[0] = (uint32_t)mappedInputDim;
-
-        PENNIS net(workgroupSize, batchSize, layerSizes, actTypes, adamParams);
+        // construct PENNIS with Fourier feature options (last three args)
+        PENNIS net(workgroupSize, batchSize, layerSizes, actTypes, adamParams, fourierBands, fourierSigma, includeInput);
 
         int winH = 600;
         int winW = int(600.0f * (float)width / (float)height);
@@ -153,15 +94,15 @@ int main()
             {
                 std::vector<int> ks(batchSize);
                 for (int j = 0; j < batchSize; ++j) ks[j] = dist(rng);
-                std::vector<float> in(batchSize * mappedInputDim);
+                std::vector<float> in(batchSize * inputDim);
                 std::vector<float> tgt(batchSize * channels);
                 #pragma omp parallel for
                 for (int j = 0; j < batchSize; ++j)
                 {
                     int k = ks[j];
-                    const int srcOffset = k * mappedInputDim;
-                    const int dstOffset = j * mappedInputDim;
-                    std::copy_n(coordsFF.begin() + srcOffset, mappedInputDim, in.begin() + dstOffset);
+                    const int srcOffset = k * inputDim;
+                    const int dstOffset = j * inputDim;
+                    std::copy_n(coords.begin() + srcOffset, inputDim, in.begin() + dstOffset);
                     for (int c = 0; c < channels; ++c) tgt[j * channels + c] = float(imageData[k * channels + c]) / 255.0f;
                 }
                 net.uploadInputs(in);
@@ -178,9 +119,9 @@ int main()
                 for (int i = 0; i < remaining; ++i)
                 {
                     int p = previewOrder[previewCursor + i];
-                    int srcOffset = p * mappedInputDim;
-                    std::vector<float> inp(mappedInputDim);
-                    std::copy_n(coordsFF.begin() + srcOffset, mappedInputDim, inp.begin());
+                    int srcOffset = p * inputDim;
+                    std::vector<float> inp(inputDim);
+                    std::copy_n(coords.begin() + srcOffset, inputDim, inp.begin());
                     std::vector<float> out = net.predict(inp);
                     int idx = p * channels;
                     for (int c = 0; c < channels; ++c)
@@ -200,9 +141,9 @@ int main()
             {
                 for (int p = 0; p < numPixels; ++p)
                 {
-                    int srcOffset = p * mappedInputDim;
-                    std::vector<float> inp(mappedInputDim);
-                    std::copy_n(coordsFF.begin() + srcOffset, mappedInputDim, inp.begin());
+                    int srcOffset = p * inputDim;
+                    std::vector<float> inp(inputDim);
+                    std::copy_n(coords.begin() + srcOffset, inputDim, inp.begin());
                     std::vector<float> out = net.predict(inp);
                     int idx = p * channels;
                     for (int c = 0; c < channels; ++c)

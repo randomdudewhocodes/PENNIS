@@ -25,11 +25,46 @@ void DestroyDebugUtilsMessengerEXT(
 
 PENNIS::PENNIS(const uint32_t workgroupSize,
                const uint32_t batchSize,
-               const std::vector<uint32_t>& layerSizes,
+               const std::vector<uint32_t>& layerSizes_in,
                const std::vector<uint32_t>& activationTypes,
-               const AdamParams adamParams)
+               const AdamParams adamParams,
+               int fourierBands,
+               float fourierSigma,
+               bool fourierIncludeInput)
     : workgroupSize(workgroupSize), batchSize(batchSize), adamParams(adamParams)
 {
+    std::vector<uint32_t> layerSizes = layerSizes_in;
+
+    if (fourierBands > 0)
+    {
+        ffEnabled = true;
+        ff_numBands = fourierBands;
+        ff_sigma = fourierSigma;
+        ff_includeInput = fourierIncludeInput;
+        ff_inputDim = static_cast<int>(layerSizes[0]);
+
+        ff_mappedDim = (ff_includeInput ? ff_inputDim : 0) + 2 * ff_numBands;
+
+        layerSizes[0] = static_cast<uint32_t>(ff_mappedDim);
+
+        ff_B.resize(size_t(ff_numBands) * size_t(ff_inputDim));
+
+        std::random_device rd;
+        std::mt19937 rng(rd());
+
+        std::vector<uint32_t> seeds(omp_get_max_threads());
+        for (int t = 0; t < (int)seeds.size(); ++t) seeds[t] = rng();
+
+        #pragma omp parallel for
+        for (size_t i = 0; i < ff_B.size(); ++i)
+        {
+            int tid = omp_get_thread_num();
+            std::mt19937 local((uint32_t)(seeds[tid] + (uint32_t)i));
+            std::normal_distribution<float> nd(0.0f, ff_sigma);
+            ff_B[i] = nd(local);
+        }
+    }
+
     size_t numLayers = layerSizes.size() - 1;
     layers.resize(numLayers);
     for (size_t i = 0; i < numLayers; i++)
@@ -38,7 +73,7 @@ PENNIS::PENNIS(const uint32_t workgroupSize,
         layers[i].outSize = layerSizes[i + 1];
         layers[i].actType = activationTypes[i];
     }
-    
+
     createInstance();
     setupDebugMessenger();
     pickPhysicalDevice();
@@ -184,7 +219,39 @@ void PENNIS::readbackFromDeviceBuffer(Buffer& srcBuf, void* dstMemory, VkDeviceS
 
 void PENNIS::uploadInputs(const std::vector<float>& inputData)
 {
+    if (ffEnabled)
+    {
+        const size_t N = inputData.size() / ff_inputDim;
+        const int outD = ff_mappedDim;
+        std::vector<float> mapped(N * outD);
+
+        #pragma omp parallel for
+        for (size_t p = 0; p < N; ++p)
+        {
+            const float* x = &inputData[p * ff_inputDim];
+            size_t base = p * outD;
+            size_t idx = base;
+
+            for (int d = 0; ff_includeInput && d < ff_inputDim; ++d) mapped[idx++] = x[d];
+
+            for (int j = 0; j < ff_numBands; ++j)
+            {
+                const float* Bj = &ff_B[size_t(j) * size_t(ff_inputDim)];
+                float proj = 0.0f;
+                for (int d = 0; d < ff_inputDim; ++d) proj += Bj[d] * x[d];
+                float angle = 2.0f * 3.141593f * proj;
+                mapped[idx++] = std::sin(angle);
+                mapped[idx++] = std::cos(angle);
+            }
+        }
+
+        Layer& inputLayer = layers.front();
+        uploadToDeviceBuffer(mapped.data(), mapped.size() * sizeof(float), inputLayer.input);
+        return;
+    }
+
     Layer& inputLayer = layers.front();
+
     uploadToDeviceBuffer(inputData.data(), inputData.size() * sizeof(float), inputLayer.input);
 }
 
@@ -294,8 +361,10 @@ void PENNIS::train()
     adamTimestep++;
 }
 
-void PENNIS::runForward()
+std::vector<float> PENNIS::predict(const std::vector<float>& inputData)
 {
+    uploadInputs(inputData);
+
     vkResetCommandBuffer(computeCommandBuffer, 0);
 
     VkCommandBufferBeginInfo beginInfo{};
@@ -311,12 +380,6 @@ void PENNIS::runForward()
         throw std::runtime_error("failed to end recording compute command buffer!");
 
     computeSubmission();
-}
-
-std::vector<float> PENNIS::predict(const std::vector<float>& inputData)
-{
-    uploadInputs(inputData);
-    runForward();
 
     Layer& outLayer = layers.back();
     uint32_t outputSize = outLayer.outSize;
@@ -336,8 +399,6 @@ std::vector<float> PENNIS::predictBatch(const std::vector<float>& inputData)
     uint32_t outSize = layers.back().outSize;
     uint32_t expectedSize = batchSize * inSize;
     if (inputData.size() != expectedSize)
-        throw std::runtime_error("predictBatch: inputData.size() != batchSize * inSize");
-
     uploadInputs(inputData);
 
     vkResetCommandBuffer(computeCommandBuffer, 0);
@@ -366,136 +427,151 @@ std::vector<float> PENNIS::predictBatch(const std::vector<float>& inputData)
 
 void PENNIS::saveArchitecture(const std::string& filename)
 {
-    std::ofstream out(filename, std::ios::binary);
-    if (!out.is_open())
-        throw std::runtime_error("failed to open file for saving architecture: " + filename);
+    std::ofstream ofs(filename, std::ios::binary);
+    if (!ofs.is_open()) throw std::runtime_error("saveArchitecture: failed to open file");
 
-    // magic
-    const char magic[8] = { 'P','E','N','N','I','S','v','1' };
-    out.write(magic, sizeof(magic));
+    const uint32_t magic = 0x504E4E53;
+    const uint32_t version = 1;
+    ofs.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
+    ofs.write(reinterpret_cast<const char*>(&version), sizeof(version));
 
-    out.write(reinterpret_cast<const char*>(&workgroupSize), sizeof(workgroupSize));
-    out.write(reinterpret_cast<const char*>(&batchSize), sizeof(batchSize));
-
-    out.write(reinterpret_cast<const char*>(&adamParams.beta1), sizeof(float));
-    out.write(reinterpret_cast<const char*>(&adamParams.beta2), sizeof(float));
-    out.write(reinterpret_cast<const char*>(&adamParams.epsilon), sizeof(float));
-    out.write(reinterpret_cast<const char*>(&adamParams.learningRate), sizeof(float));
-    out.write(reinterpret_cast<const char*>(&adamParams.weightDecay), sizeof(float));
-
-    uint32_t numLayers = static_cast<uint32_t>(layers.size());
-    out.write(reinterpret_cast<const char*>(&numLayers), sizeof(numLayers));
-
-    for (const auto& L : layers)
+    std::vector<uint32_t> layerSizes;
+    if (ffEnabled)
     {
-        uint32_t inSize = L.inSize;
-        uint32_t outSize = L.outSize;
-        uint32_t actType = L.actType;
-        out.write(reinterpret_cast<const char*>(&inSize), sizeof(inSize));
-        out.write(reinterpret_cast<const char*>(&outSize), sizeof(outSize));
-        out.write(reinterpret_cast<const char*>(&actType), sizeof(actType));
+        layerSizes.push_back((uint32_t)ff_inputDim);
+    }
+    else
+    {
+        layerSizes.push_back(layers.front().inSize);
+    }
+    for (size_t i = 0; i < layers.size(); ++i)
+    {
+        layerSizes.push_back(layers[i].outSize);
     }
 
-    for (auto &L : layers)
+    uint32_t layerCount = (uint32_t)layerSizes.size();
+    ofs.write(reinterpret_cast<const char*>(&layerCount), sizeof(layerCount));
+    ofs.write(reinterpret_cast<const char*>(layerSizes.data()), layerCount * sizeof(uint32_t));
+
+    uint32_t actCount = (uint32_t)layers.size();
+    ofs.write(reinterpret_cast<const char*>(&actCount), sizeof(actCount));
+    for (size_t i = 0; i < layers.size(); ++i)
     {
-        uint32_t inSize = L.inSize;
-        uint32_t outSize = L.outSize;
-        uint32_t wcount = inSize * outSize;
-        uint32_t bcount = outSize;
-
-        std::vector<float> weights((size_t)wcount);
-        std::vector<float> biases((size_t)bcount);
-
-        readbackFromDeviceBuffer(const_cast<Buffer&>(L.weights), weights.data(), (VkDeviceSize)wcount * sizeof(float));
-        readbackFromDeviceBuffer(const_cast<Buffer&>(L.biases),  biases.data(),  (VkDeviceSize)bcount * sizeof(float));
-
-        out.write(reinterpret_cast<const char*>(&wcount), sizeof(wcount));
-        out.write(reinterpret_cast<const char*>(weights.data()), (std::streamsize)wcount * sizeof(float));
-
-        out.write(reinterpret_cast<const char*>(&bcount), sizeof(bcount));
-        out.write(reinterpret_cast<const char*>(biases.data()), (std::streamsize)bcount * sizeof(float));
+        uint32_t at = layers[i].actType;
+        ofs.write(reinterpret_cast<const char*>(&at), sizeof(at));
     }
 
-    out.close();
-    if (!out) throw std::runtime_error("error while writing architecture file: " + filename);
+    uint8_t ff = ffEnabled ? 1u : 0u;
+    ofs.write(reinterpret_cast<const char*>(&ff), sizeof(ff));
+    if (ffEnabled)
+    {
+        uint32_t inputDim = (uint32_t)ff_inputDim;
+        uint32_t numBands = (uint32_t)ff_numBands;
+        float sigma = ff_sigma;
+        uint8_t include = ff_includeInput ? 1u : 0u;
+        ofs.write(reinterpret_cast<const char*>(&inputDim), sizeof(inputDim));
+        ofs.write(reinterpret_cast<const char*>(&numBands), sizeof(numBands));
+        ofs.write(reinterpret_cast<const char*>(&sigma), sizeof(sigma));
+        ofs.write(reinterpret_cast<const char*>(&include), sizeof(include));
+
+        uint32_t Bcount = (uint32_t)ff_B.size();
+        ofs.write(reinterpret_cast<const char*>(&Bcount), sizeof(Bcount));
+        if (Bcount)
+            ofs.write(reinterpret_cast<const char*>(ff_B.data()), (size_t)Bcount * sizeof(float));
+    }
+
+    ofs.close();
 }
 
 PENNIS* PENNIS::loadFromFile(const std::string& filename)
 {
-    std::ifstream in(filename, std::ios::binary);
-    if (!in.is_open())
-        throw std::runtime_error("failed to open architecture file: " + filename);
+    std::ifstream ifs(filename, std::ios::binary);
+    if (!ifs.is_open()) throw std::runtime_error("loadFromFile: failed to open file");
 
-    // read magic
-    char magic[8];
-    in.read(magic, sizeof(magic));
-    const char expected[8] = { 'P','E','N','N','I','S','v','1' };
-    if (std::memcmp(magic, expected, sizeof(magic)) != 0)
-        throw std::runtime_error("unsupported or corrupt architecture file (bad magic): " + filename);
+    uint32_t magic = 0;
+    ifs.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+    if (magic != 0x504E4E53) throw std::runtime_error("loadFromFile: bad file format");
 
-    uint32_t fileWorkgroupSize = 0;
-    uint32_t fileBatchSize = 0;
-    in.read(reinterpret_cast<char*>(&fileWorkgroupSize), sizeof(fileWorkgroupSize));
-    in.read(reinterpret_cast<char*>(&fileBatchSize), sizeof(fileBatchSize));
+    uint32_t version = 0;
+    ifs.read(reinterpret_cast<char*>(&version), sizeof(version));
+    if (version != 1) throw std::runtime_error("loadFromFile: unsupported version");
 
-    AdamParams fileAdam{};
-    in.read(reinterpret_cast<char*>(&fileAdam.beta1), sizeof(float));
-    in.read(reinterpret_cast<char*>(&fileAdam.beta2), sizeof(float));
-    in.read(reinterpret_cast<char*>(&fileAdam.epsilon), sizeof(float));
-    in.read(reinterpret_cast<char*>(&fileAdam.learningRate), sizeof(float));
-    in.read(reinterpret_cast<char*>(&fileAdam.weightDecay), sizeof(float));
+    uint32_t layerCount = 0;
+    ifs.read(reinterpret_cast<char*>(&layerCount), sizeof(layerCount));
+    if (layerCount < 2) throw std::runtime_error("loadFromFile: invalid layer count");
 
-    uint32_t numLayers = 0;
-    in.read(reinterpret_cast<char*>(&numLayers), sizeof(numLayers));
+    std::vector<uint32_t> layerSizes(layerCount);
+    ifs.read(reinterpret_cast<char*>(layerSizes.data()), layerCount * sizeof(uint32_t));
 
-    if (numLayers < 1)
-        throw std::runtime_error("invalid number of layers in architecture file: " + filename);
+    uint32_t actCount = 0;
+    ifs.read(reinterpret_cast<char*>(&actCount), sizeof(actCount));
 
-    std::vector<uint32_t> layerSizes;
-    std::vector<uint32_t> actTypes;
-    layerSizes.reserve(numLayers + 1);
-
-    for (uint32_t i = 0; i < numLayers; ++i)
+    std::vector<uint32_t> actTypes(actCount);
+    for (uint32_t i = 0; i < actCount; ++i)
     {
-        uint32_t inSize = 0, outSize = 0, actType = 0;
-        in.read(reinterpret_cast<char*>(&inSize), sizeof(inSize));
-        in.read(reinterpret_cast<char*>(&outSize), sizeof(outSize));
-        in.read(reinterpret_cast<char*>(&actType), sizeof(actType));
-
-        if (i == 0) layerSizes.push_back(inSize);
-        layerSizes.push_back(outSize);
-        actTypes.push_back(actType);
+        uint32_t at = 0;
+        ifs.read(reinterpret_cast<char*>(&at), sizeof(at));
+        actTypes[i] = at;
     }
 
-    PENNIS* net = new PENNIS(fileWorkgroupSize, fileBatchSize, layerSizes, actTypes, fileAdam);
+    uint8_t ff = 0;
+    ifs.read(reinterpret_cast<char*>(&ff), sizeof(ff));
 
-    for (size_t i = 0; i < net->layers.size(); ++i)
+    int file_ff_inputDim = 0;
+    int file_ff_numBands = 0;
+    float file_ff_sigma = 0.0f;
+    bool file_ff_includeInput = true;
+    std::vector<float> file_ff_B;
+
+    if (ff)
     {
-        Layer& L = net->layers[i];
+        uint32_t inputDim = 0, numBands = 0;
+        float sigma = 0.0f;
+        uint8_t include = 1u;
+        ifs.read(reinterpret_cast<char*>(&inputDim), sizeof(inputDim));
+        ifs.read(reinterpret_cast<char*>(&numBands), sizeof(numBands));
+        ifs.read(reinterpret_cast<char*>(&sigma), sizeof(sigma));
+        ifs.read(reinterpret_cast<char*>(&include), sizeof(include));
 
-        uint32_t wcount = 0, bcount = 0;
-        in.read(reinterpret_cast<char*>(&wcount), sizeof(wcount));
-        if (wcount != L.inSize * L.outSize)
-            throw std::runtime_error("mismatch in weight count when loading architecture: " + filename);
+        file_ff_inputDim = (int)inputDim;
+        file_ff_numBands = (int)numBands;
+        file_ff_sigma = sigma;
+        file_ff_includeInput = include != 0;
 
-        std::vector<float> weights((size_t)wcount);
-        in.read(reinterpret_cast<char*>(weights.data()), (std::streamsize)wcount * sizeof(float));
-
-        in.read(reinterpret_cast<char*>(&bcount), sizeof(bcount));
-        if (bcount != L.outSize)
-            throw std::runtime_error("mismatch in bias count when loading architecture: " + filename);
-
-        std::vector<float> biases((size_t)bcount);
-        in.read(reinterpret_cast<char*>(biases.data()), (std::streamsize)bcount * sizeof(float));
-
-        net->uploadToDeviceBuffer(weights.data(), (VkDeviceSize)wcount * sizeof(float), L.weights);
-        net->uploadToDeviceBuffer(biases.data(),  (VkDeviceSize)bcount * sizeof(float),  L.biases);
+        uint32_t Bcount = 0;
+        ifs.read(reinterpret_cast<char*>(&Bcount), sizeof(Bcount));
+        if (Bcount)
+        {
+            file_ff_B.resize(Bcount);
+            ifs.read(reinterpret_cast<char*>(file_ff_B.data()), (size_t)Bcount * sizeof(float));
+        }
     }
 
-    if (!in) throw std::runtime_error("error while reading architecture file: " + filename);
-    in.close();
+    ifs.close();
 
-    return net;
+    PENNIS* newNet = nullptr;
+    try
+    {
+        newNet = new PENNIS(this->workgroupSize, this->batchSize, layerSizes, actTypes, this->adamParams,
+                            (ff ? file_ff_numBands : 0), file_ff_sigma, file_ff_includeInput);
+
+        if (ff && !file_ff_B.empty())
+        {
+            newNet->ff_B = file_ff_B;
+            newNet->ff_inputDim = file_ff_inputDim;
+            newNet->ff_numBands = file_ff_numBands;
+            newNet->ff_sigma = file_ff_sigma;
+            newNet->ff_includeInput = file_ff_includeInput;
+            newNet->ff_mappedDim = (file_ff_includeInput ? file_ff_inputDim : 0) + 2 * file_ff_numBands;
+        }
+    }
+    catch (...)
+    {
+        delete newNet;
+        throw;
+    }
+
+    return newNet;
 }
 
 const char* activationName(uint32_t activationType)

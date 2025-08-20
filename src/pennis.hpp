@@ -10,6 +10,7 @@
 #include <optional>
 #include <random>
 #include <cmath>
+#include <omp.h>
 
 const std::vector<const char*> validationLayers = {
     "VK_LAYER_KHRONOS_validation"
@@ -59,7 +60,6 @@ public:
     void uploadInputs(const std::vector<float>& inputData);
     void uploadTargets(const std::vector<float>& targetData);
     void train();
-    void runForward();
     std::vector<float> predict(const std::vector<float>& inputData);
     std::vector<float> predictBatch(const std::vector<float>& inputData);
     void printArchitecture();
@@ -71,7 +71,10 @@ public:
            const uint32_t batchSize,
            const std::vector<uint32_t>& layerSizes,
            const std::vector<uint32_t>& activationTypes,
-           const AdamParams adamParams);
+           const AdamParams adamParams,
+           int fourierBands = 0,
+           float fourierSigma = 10.0f,
+           bool fourierIncludeInput = true);
     
     ~PENNIS();
 private:
@@ -107,6 +110,15 @@ private:
     Buffer targetBuffer;
     AdamParams adamParams;
     uint32_t adamTimestep = 1;
+
+    // Fourier feature members
+    bool ffEnabled = false;
+    int ff_inputDim = 0;
+    int ff_numBands = 0;
+    float ff_sigma = 0.0f;
+    bool ff_includeInput = true;
+    int ff_mappedDim = 0;
+    std::vector<float> ff_B;
 
     void initVulkan();
     void cleanup();

@@ -1,4 +1,3 @@
-#include "raylib.h"
 #include "pennis.hpp"
 
 #include <vector>
@@ -7,10 +6,35 @@
 #include <cmath>
 #include <cstdint>
 #include <iostream>
-#include "stb_image.h"
+#include <string>
 #include <omp.h>
 
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+
+#include "imgui.h"
+#include "backends/imgui_impl_glfw.h"
+#include "backends/imgui_impl_opengl3.h"
+#include <GLFW/glfw3.h>
+
 static inline float clamp01(float x) { return x < 0.f ? 0.f : (x > 1.f ? 1.f : x); }
+
+static GLuint createTexture(int width, int height, const unsigned char* data) {
+    GLuint tex;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, data);
+    return tex;
+}
+
+static void updateTexture(GLuint tex, int width, int height, const unsigned char* data) {
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height,
+                    GL_RGBA, GL_UNSIGNED_BYTE, data);
+}
 
 int main()
 {
@@ -19,11 +43,13 @@ int main()
         int width = 0, height = 0, channels = 0;
         const int desired_channels = 4;
         unsigned char* data = stbi_load("src/examples/image.jpg", &width, &height, &channels, desired_channels);
+
         if (!data)
         {
             std::cerr << "Failed to load image.jpg\n";
             return EXIT_FAILURE;
         }
+
         channels = desired_channels;
 
         const int numPixels = width * height;
@@ -31,10 +57,8 @@ int main()
         std::vector<unsigned char> imageData(data, data + (numPixels * channels));
         stbi_image_free(data);
 
-        const int inputDim = 2; // original coordinate dimension
-
-        // Set Fourier feature choice here: 0 = disabled, >0 = number of bands
-        const int fourierBands = 256; // change to 0 to disable
+        const int inputDim = 2;
+        const int fourierBands = 256;
         const float fourierSigma = 10.0f;
         const bool includeInput = true;
 
@@ -60,16 +84,19 @@ int main()
             }
         }
 
-        // construct PENNIS with Fourier feature options (last three args)
-        PENNIS net(workgroupSize, batchSize, layerSizes, actTypes, adamParams, fourierBands, fourierSigma, includeInput);
+        PENNIS net(workgroupSize, batchSize, layerSizes, actTypes, adamParams,
+                   fourierBands, fourierSigma, includeInput);
 
-        int winH = 600;
-        int winW = int(600.0f * (float)width / (float)height);
-        InitWindow(winW, winH, "NN Training Visualizer");
+        if (!glfwInit()) return -1;
+        GLFWwindow* window = glfwCreateWindow(800, 600, "NN Training Visualizer", NULL, NULL);
+        glfwMakeContextCurrent(window);
+        glfwSwapInterval(1);
 
-        Image blank = GenImageColor(width, height, BLANK);
-        Texture2D tex = LoadTextureFromImage(blank);
-        UnloadImage(blank);
+        IMGUI_CHECKVERSION();
+        ImGui::CreateContext();
+        ImGui::StyleColorsDark();
+        ImGui_ImplGlfw_InitForOpenGL(window, true);
+        ImGui_ImplOpenGL3_Init("#version 130");
 
         std::vector<unsigned char> preview(width * height * channels, 0);
 
@@ -80,38 +107,21 @@ int main()
 
         int currentEpoch = 0;
         bool saved = false;
+        float loss = 0.0f;
+
+        std::uniform_int_distribution<int> dist(0, numSamples - 1);
+
+        GLuint tex = createTexture(width, height, preview.data());
 
         const int trainStepsPerFrame = 4;
         const int previewChunk = 256;
 
-        float lastLoss = 0.0f;
-
-        std::uniform_int_distribution<int> dist(0, numSamples - 1);
-
-        while (!WindowShouldClose())
+        while (!glfwWindowShouldClose(window))
         {
-            for (int s = 0; s < trainStepsPerFrame && currentEpoch < epochs; ++s)
-            {
-                std::vector<int> ks(batchSize);
-                for (int j = 0; j < batchSize; ++j) ks[j] = dist(rng);
-                std::vector<float> in(batchSize * inputDim);
-                std::vector<float> tgt(batchSize * channels);
-                #pragma omp parallel for
-                for (int j = 0; j < batchSize; ++j)
-                {
-                    int k = ks[j];
-                    const int srcOffset = k * inputDim;
-                    const int dstOffset = j * inputDim;
-                    std::copy_n(coords.begin() + srcOffset, inputDim, in.begin() + dstOffset);
-                    for (int c = 0; c < channels; ++c) tgt[j * channels + c] = float(imageData[k * channels + c]) / 255.0f;
-                }
-                net.uploadInputs(in);
-                net.uploadTargets(tgt);
-                net.train();
-                currentEpoch++;
-            }
-
-            lastLoss = net.getLoss();
+            glfwPollEvents();
+            ImGui_ImplOpenGL3_NewFrame();
+            ImGui_ImplGlfw_NewFrame();
+            ImGui::NewFrame();
 
             if (currentEpoch < epochs)
             {
@@ -119,17 +129,16 @@ int main()
                 for (int i = 0; i < remaining; ++i)
                 {
                     int p = previewOrder[previewCursor + i];
-                    int srcOffset = p * inputDim;
                     std::vector<float> inp(inputDim);
-                    std::copy_n(coords.begin() + srcOffset, inputDim, inp.begin());
+                    std::copy_n(coords.begin() + p*inputDim, inputDim, inp.begin());
                     std::vector<float> out = net.predict(inp);
                     int idx = p * channels;
-                    for (int c = 0; c < channels; ++c)
-                    {
+                    for (int c = 0; c < channels; ++c) {
                         float v = clamp01(out[c]);
                         preview[idx + c] = static_cast<unsigned char>(std::lrint(v * 255.0f));
                     }
                 }
+
                 previewCursor += remaining;
                 if (previewCursor >= numPixels)
                 {
@@ -141,58 +150,85 @@ int main()
             {
                 for (int p = 0; p < numPixels; ++p)
                 {
-                    int srcOffset = p * inputDim;
                     std::vector<float> inp(inputDim);
-                    std::copy_n(coords.begin() + srcOffset, inputDim, inp.begin());
+                    std::copy_n(coords.begin() + p*inputDim, inputDim, inp.begin());
                     std::vector<float> out = net.predict(inp);
                     int idx = p * channels;
-                    for (int c = 0; c < channels; ++c)
-                    {
+                    for (int c = 0; c < channels; ++c) {
                         float v = clamp01(out[c]);
                         preview[idx + c] = static_cast<unsigned char>(std::lrint(v * 255.0f));
                     }
                 }
-                UpdateTexture(tex, preview.data());
-                const char* filename = "image_model.pnn";
-                net.saveArchitecture(filename);
-                std::cout << "Training complete. Saved model to: " << filename << std::endl;
+                updateTexture(tex, width, height, preview.data());
+                net.saveArchitecture("src/examples/image_model.pnn");
+                std::cout << "Training complete. Saved model.\n";
                 saved = true;
             }
 
-            UpdateTexture(tex, preview.data());
+            updateTexture(tex, width, height, preview.data());
 
-            BeginDrawing();
-            ClearBackground(BLACK);
+            ImVec2 windowSize = ImGui::GetIO().DisplaySize;
+            float fontSize = ImGui::GetFontSize();
 
-            float scale = (float)GetScreenHeight() / (float)height;
-            DrawTextureEx(tex, {0,0}, 0.0f, scale, WHITE);
+            ImGui::SetNextWindowPos(ImVec2(0, 0));
+            ImGui::SetNextWindowSize(windowSize);
 
-            DrawRectangle(8, 8, 360, 70, Fade(BLACK, 0.6f));
-            DrawText(TextFormat("Epoch: %d / %d", currentEpoch, epochs), 16, 16, 18, RAYWHITE);
-            DrawText(TextFormat("Loss:  %.6f", lastLoss),                16, 38, 18, RAYWHITE);
-            DrawText("ESC: save & quit",                                 16, 58, 18, RAYWHITE);
-            EndDrawing();
+            ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | 
+                                     ImGuiWindowFlags_NoResize |
+                                     ImGuiWindowFlags_NoMove |
+                                     ImGuiWindowFlags_NoScrollbar |
+                                     ImGuiWindowFlags_NoCollapse |
+                                     ImGuiWindowFlags_NoSavedSettings;
+
+            ImGui::Begin("NN Training Visualizer", nullptr, flags);
+            ImGui::Text("Epoch: %d / %d", currentEpoch, epochs);
+            ImGui::Text("Loss: %f", loss);
+            
+            ImVec2 canvasSize = ImGui::GetContentRegionAvail();
+
+            float scale = std::min(canvasSize.x / (float)width, canvasSize.y / (float)height);
+
+            ImGui::Image((void*)(intptr_t)tex, ImVec2(width * scale, height * scale));
+            ImGui::End();
+
+            for (int s = 0; s < trainStepsPerFrame && currentEpoch < epochs; ++s)
+            {
+                std::vector<int> ks(batchSize);
+                for (int j = 0; j < batchSize; ++j) ks[j] = dist(rng);
+                std::vector<float> in(batchSize * inputDim);
+                std::vector<float> tgt(batchSize * channels);
+                #pragma omp parallel for
+                for (int j = 0; j < batchSize; ++j) {
+                    int k = ks[j];
+                    std::copy_n(coords.begin() + k*inputDim, inputDim, in.begin() + j*inputDim);
+                    for (int c = 0; c < channels; ++c)
+                        tgt[j*channels + c] = float(imageData[k*channels + c]) / 255.0f;
+                }
+                net.uploadInputs(in);
+                net.uploadTargets(tgt);
+                net.train();
+                currentEpoch++;
+            }
+            loss = net.getLoss();
+
+            ImGui::Render();
+            int display_w, display_h;
+            glfwGetFramebufferSize(window, &display_w, &display_h);
+            glViewport(0,0,display_w,display_h);
+            glClearColor(0.1f,0.1f,0.1f,1.0f);
+            glClear(GL_COLOR_BUFFER_BIT);
+            ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+            glfwSwapBuffers(window);
         }
 
-        UnloadTexture(tex);
-        CloseWindow();
-
-        if (!saved)
-        {
-            try
-            {
-                const char* filename = "image_model.pnn";
-                net.saveArchitecture(filename);
-                std::cout << "Saved model at exit to: " << filename << std::endl;
-            }
-            catch (const std::exception& e)
-            {
-                std::cerr << "Failed to save model: " << e.what() << std::endl;
-            }
-        }
+        // cleanup
+        ImGui_ImplOpenGL3_Shutdown();
+        ImGui_ImplGlfw_Shutdown();
+        ImGui::DestroyContext();
+        glfwDestroyWindow(window);
+        glfwTerminate();
     }
-    catch (const std::exception& e)
-    {
+    catch (const std::exception& e) {
         std::cerr << "[Fatal] " << e.what() << std::endl;
         return EXIT_FAILURE;
     }

@@ -8,6 +8,14 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(Vulkan REQUIRED)
 find_program(GLSLC_EXECUTABLE glslc REQUIRED)
 
+# ---------------- GLFW ----------------
+set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
+
+add_subdirectory(${CMAKE_SOURCE_DIR}/glfw ${CMAKE_BINARY_DIR}/glfw)
+
 # ---------------- Shaders ----------------
 function(add_shaders TARGET_NAME)
     set(SHADER_SOURCE_FILES ${ARGN})
@@ -60,22 +68,39 @@ endfunction()
 # Compile shader files
 add_shaders(shaders)
 
-# ---------------- Raylib ----------------
-add_subdirectory("${CMAKE_SOURCE_DIR}/raylib" ${CMAKE_BINARY_DIR}/raylib)
-
 # ---------------- PENNIS core library ----------------
 add_library(pennis STATIC
     src/pennis.cpp
+    # ImGui core
+    ${CMAKE_SOURCE_DIR}/imgui/imgui.cpp
+    ${CMAKE_SOURCE_DIR}/imgui/imgui_draw.cpp
+    ${CMAKE_SOURCE_DIR}/imgui/imgui_tables.cpp
+    ${CMAKE_SOURCE_DIR}/imgui/imgui_widgets.cpp
+    # ImGui backends
+    ${CMAKE_SOURCE_DIR}/imgui/backends/imgui_impl_glfw.cpp
+    ${CMAKE_SOURCE_DIR}/imgui/backends/imgui_impl_vulkan.cpp
+    ${CMAKE_SOURCE_DIR}/imgui/backends/imgui_impl_opengl3.cpp
 )
-target_include_directories(pennis PUBLIC ${CMAKE_SOURCE_DIR}/src ${Vulkan_INCLUDE_DIRS})
-target_link_libraries(pennis PUBLIC ${Vulkan_LIBRARIES} raylib)
+
+target_include_directories(pennis PUBLIC
+    ${CMAKE_SOURCE_DIR}/src
+    ${Vulkan_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/imgui
+    ${CMAKE_SOURCE_DIR}/imgui/backends
+)
+
+target_link_libraries(pennis PUBLIC
+    ${Vulkan_LIBRARIES}
+    glfw
+)
 
 if (MSVC)
     target_link_libraries(pennis PUBLIC winmm.lib gdi32.lib opengl32.lib)
+else()
+    target_link_libraries(pennis PUBLIC GL)
 endif()
 
 # ---------------- Examples ----------------
-# Build every .cpp in examples/ as its own executable
 file(GLOB EXAMPLE_SOURCES "${CMAKE_SOURCE_DIR}/src/examples/*.cpp")
 
 foreach(EXAMPLE_FILE IN LISTS EXAMPLE_SOURCES)
@@ -85,8 +110,3 @@ foreach(EXAMPLE_FILE IN LISTS EXAMPLE_SOURCES)
     target_link_libraries(${EXAMPLE_NAME} PRIVATE pennis)
     add_dependencies(${EXAMPLE_NAME} shaders)
 endforeach()
-
-# stb include directory in raylib
-target_include_directories(image_fitting PRIVATE
-    ${CMAKE_SOURCE_DIR}/raylib/src/external
-)

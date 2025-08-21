@@ -57,35 +57,42 @@ int main()
         std::vector<unsigned char> imageData(data, data + (numPixels * channels));
         stbi_image_free(data);
 
-        const int inputDim = 2;
         const int fourierBands = 256;
         const float fourierSigma = 10.0f;
         const bool includeInput = true;
 
-        std::vector<uint32_t> layerSizes = { (uint32_t)inputDim, 256, 256, 256, 256, 256, (uint32_t)channels };
+        std::vector<uint32_t> layerSizes = { 2, 256, 256, 256, 256, 256, (uint32_t)channels };
         std::vector<uint32_t> actTypes   = { Sine, Sine, Sine, Sine, Sine, None };
         AdamParams adamParams = { 0.9f, 0.999f, 1e-8f, 0.001f, 0.001f };
 
         const uint32_t workgroupSize = 512;
-        const int      batchSize     = 256;
+        const int      batchSize     = 128;
         const int      epochs        = 5000;
 
         std::mt19937 rng{ std::random_device{}() };
 
-        std::vector<float> coords(numPixels * inputDim);
+        PENNIS net(workgroupSize, batchSize, layerSizes, actTypes, adamParams,
+                   fourierBands, fourierSigma, includeInput);
+        
+        std::vector<float> coords(numPixels * 2);
+        std::vector<float> tgt(numPixels * channels);
+
         #pragma omp parallel for
         for (int y = 0; y < height; ++y)
         {
             for (int x = 0; x < width; ++x)
             {
                 const int p = y * width + x;
-                coords[p * inputDim + 0] = 2.0f * float(x) / width - 1.0f;
-                coords[p * inputDim + 1] = 2.0f * float(y) / height - 1.0f;
+                coords[p * 2 + 0] = 2.0f * float(x) / width - 1.0f;
+                coords[p * 2 + 1] = 2.0f * float(y) / height - 1.0f;
+
+                for (int c = 0; c < channels; ++c)
+                    tgt[(x + y * width) * channels + c] = float(imageData[(x + y * width) * channels + c]) / 255.0f;
             }
         }
 
-        PENNIS net(workgroupSize, batchSize, layerSizes, actTypes, adamParams,
-                   fourierBands, fourierSigma, includeInput);
+        net.uploadTrainInputs(coords);
+        net.uploadTrainTargets(tgt);
 
         if (!glfwInit()) return -1;
         GLFWwindow* window = glfwCreateWindow(800, 600, "NN Training Visualizer", NULL, NULL);
@@ -129,8 +136,8 @@ int main()
                 for (int i = 0; i < remaining; ++i)
                 {
                     int p = previewOrder[previewCursor + i];
-                    std::vector<float> inp(inputDim);
-                    std::copy_n(coords.begin() + p*inputDim, inputDim, inp.begin());
+                    std::vector<float> inp(2);
+                    std::copy_n(coords.begin() + p*2, 2, inp.begin());
                     std::vector<float> out = net.predict(inp);
                     int idx = p * channels;
                     for (int c = 0; c < channels; ++c) {
@@ -150,8 +157,8 @@ int main()
             {
                 for (int p = 0; p < numPixels; ++p)
                 {
-                    std::vector<float> inp(inputDim);
-                    std::copy_n(coords.begin() + p*inputDim, inputDim, inp.begin());
+                    std::vector<float> inp(2);
+                    std::copy_n(coords.begin() + p*2, 2, inp.begin());
                     std::vector<float> out = net.predict(inp);
                     int idx = p * channels;
                     for (int c = 0; c < channels; ++c) {
@@ -193,19 +200,6 @@ int main()
 
             for (int s = 0; s < trainStepsPerFrame && currentEpoch < epochs; ++s)
             {
-                std::vector<int> ks(batchSize);
-                for (int j = 0; j < batchSize; ++j) ks[j] = dist(rng);
-                std::vector<float> in(batchSize * inputDim);
-                std::vector<float> tgt(batchSize * channels);
-                #pragma omp parallel for
-                for (int j = 0; j < batchSize; ++j) {
-                    int k = ks[j];
-                    std::copy_n(coords.begin() + k*inputDim, inputDim, in.begin() + j*inputDim);
-                    for (int c = 0; c < channels; ++c)
-                        tgt[j*channels + c] = float(imageData[k*channels + c]) / 255.0f;
-                }
-                net.uploadInputs(in);
-                net.uploadTargets(tgt);
                 net.train();
                 currentEpoch++;
             }

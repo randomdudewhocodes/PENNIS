@@ -10,6 +10,7 @@
 #include <optional>
 #include <random>
 #include <cmath>
+#include <numeric>
 #include <omp.h>
 
 const std::vector<const char*> validationLayers = {
@@ -32,8 +33,8 @@ enum ActivationFunction { None, ReLU, Sigmoid, Tanh, Sine };
 
 struct Buffer
 {
-    VkBuffer buffer;
-    VkDeviceMemory memory;
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
 };
 
 struct AdamParams
@@ -58,7 +59,8 @@ class PENNIS
 {
 public:
     void uploadInputs(const std::vector<float>& inputData);
-    void uploadTargets(const std::vector<float>& targetData);
+    void uploadTrainInputs(const std::vector<float>& inputData);
+    void uploadTrainTargets(const std::vector<float>& targetData);
     void train();
     std::vector<float> predict(const std::vector<float>& inputData);
     std::vector<float> predictBatch(const std::vector<float>& inputData);
@@ -83,10 +85,13 @@ private:
     VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
     VkDevice device;
     VkQueue computeQueue;
+    VkDescriptorSetLayout samplerDescriptorSetLayout;
     VkDescriptorSetLayout forwardDescriptorSetLayout;
     VkDescriptorSetLayout backpropDescriptorSetLayout;
     VkDescriptorSetLayout adamDescriptorSetLayout;
     VkDescriptorSetLayout reduceDescriptorSetLayout;
+    VkPipelineLayout samplerPipelineLayout;
+    VkPipeline samplerPipeline;
     VkPipelineLayout forwardPipelineLayout;
     VkPipeline forwardPipeline;
     VkPipelineLayout backpropPipelineLayout;
@@ -97,6 +102,7 @@ private:
     VkPipeline reducePipeline;
     VkCommandPool commandPool;
     VkDescriptorPool descriptorPool;
+    std::vector<VkDescriptorSet> samplerDescriptorSets;
     std::vector<VkDescriptorSet> forwardDescriptorSets;
     std::vector<VkDescriptorSet> backpropDescriptorSets;
     std::vector<VkDescriptorSet> adamDescriptorSets;
@@ -107,6 +113,13 @@ private:
     uint32_t workgroupSize;
     uint32_t batchSize;
     std::vector<Layer> layers;
+
+    Buffer trainingInputBuffer;
+    Buffer trainingTargetBuffer;
+    uint32_t datasetSize;
+    Buffer indexBuffer;
+    size_t indexCursor = 0;
+
     Buffer targetBuffer;
     AdamParams adamParams;
     uint32_t adamTimestep = 1;
@@ -119,6 +132,9 @@ private:
     bool ff_includeInput = true;
     int ff_mappedDim = 0;
     std::vector<float> ff_B;
+
+    void shuffleAndUploadIndices();
+    void updateSamplerDescriptors();
 
     void initVulkan();
     void cleanup();
@@ -137,6 +153,7 @@ private:
     void createComputeDescriptorSets();
     void createComputeCommandBuffers();
     void createSyncObjects();
+    void recordSamplerCommandBuffer();
     void recordForwardBatchCommandBuffer();
     void recordForwardCommandBuffer();
     void recordBackpropCommandBuffer();

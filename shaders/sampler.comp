@@ -1,0 +1,28 @@
+#version 450
+
+layout(constant_id = 0) const uint workgroupSize = 256;
+layout(local_size_x_id = 0) in;
+
+layout(set = 0, binding = 0) readonly  buffer TrainData { float trainData[]; };
+layout(set = 0, binding = 1) writeonly buffer NewData   { float data[]; };
+layout(set = 0, binding = 2) readonly  buffer Indexes   { uint  idx[]; };
+
+layout(push_constant) uniform Push {
+    uint datasetSize;
+    uint batchSize;
+    uint size;
+    uint startIndex;
+} push;
+
+void main()
+{
+    uint id = gl_GlobalInvocationID.x;
+    if (id >= push.size * push.batchSize) return;
+
+    uint elemInExample = id % push.size;
+    uint batch = id / push.size;
+    uint idxPos = push.startIndex + batch;
+    uint datasetIndex = idx[idxPos];
+    uint srcPos = datasetIndex * push.size + elemInExample;
+    data[id] = trainData[srcPos];
+}

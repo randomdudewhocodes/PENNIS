@@ -63,7 +63,6 @@ public:
     void uploadTrainTargets(const std::vector<float>& targetData);
     void train();
     std::vector<float> predict(const std::vector<float>& inputData);
-    std::vector<float> predictBatch(const std::vector<float>& inputData);
     void printArchitecture();
     void saveArchitecture(const std::string& filename);
     PENNIS* loadFromFile(const std::string& filename);
@@ -120,6 +119,9 @@ private:
     Buffer indexBuffer;
     size_t indexCursor = 0;
 
+    std::vector<float> predictInputHost;
+    std::vector<float> predictOutputHost;
+
     Buffer targetBuffer;
     AdamParams adamParams;
     uint32_t adamTimestep = 1;
@@ -154,7 +156,6 @@ private:
     void createComputeCommandBuffers();
     void createSyncObjects();
     void recordSamplerCommandBuffer();
-    void recordForwardBatchCommandBuffer();
     void recordForwardCommandBuffer();
     void recordBackpropCommandBuffer();
     void recordReduceCommandBuffer();

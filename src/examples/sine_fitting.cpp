@@ -17,7 +17,6 @@ int main()
         AdamParams adamParams = {0.9f, 0.999f, 1e-8f, 0.005f, 0.01f};
 
         int numSamples = 50;
-        // wrap PENNIS construction in try/catch so we can see error messages
         PENNIS pennis(256, numSamples, layerSizes, actTypes, adamParams);
 
         const int epochs = 5000;
@@ -77,10 +76,29 @@ int main()
                 saved = true;
             }
 
-            for (int px = 0; px < numSamples; px++)
             {
-                auto out = pennis.predict({trainInput[px]});
-                nn[px] = out[0];
+                std::vector<float> batchOut = pennis.predict(trainInput);
+
+                int outPerSample = 1;
+                if (numSamples > 0)
+                {
+                    if (!batchOut.empty())
+                        outPerSample = static_cast<int>(batchOut.size()) / numSamples;
+                    else
+                        outPerSample = 0;
+                }
+
+                if (outPerSample <= 0)
+                {
+                    for (int i = 0; i < numSamples; ++i) nn[i] = 0.0f;
+                }
+                else
+                {
+                    for (int i = 0; i < numSamples; ++i)
+                    {
+                        nn[i] = batchOut[i * outPerSample + 0];
+                    }
+                }
             }
 
             ImVec2 windowSize = ImGui::GetIO().DisplaySize;

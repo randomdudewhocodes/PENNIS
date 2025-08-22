@@ -121,7 +121,7 @@ int main()
         GLuint tex = createTexture(width, height, preview.data());
 
         const int trainStepsPerFrame = 4;
-        const int previewChunk = 256;
+        const int previewChunk = numPixels;
 
         while (!glfwWindowShouldClose(window))
         {
@@ -130,46 +130,68 @@ int main()
             ImGui_ImplGlfw_NewFrame();
             ImGui::NewFrame();
 
-            if (currentEpoch < epochs)
+            if(currentEpoch % 50 == 0)
             {
-                int remaining = std::min(previewChunk, numPixels - previewCursor);
-                for (int i = 0; i < remaining; ++i)
+                if (currentEpoch < epochs)
                 {
-                    int p = previewOrder[previewCursor + i];
-                    std::vector<float> inp(2);
-                    std::copy_n(coords.begin() + p*2, 2, inp.begin());
-                    std::vector<float> out = net.predict(inp);
-                    int idx = p * channels;
-                    for (int c = 0; c < channels; ++c) {
-                        float v = clamp01(out[c]);
-                        preview[idx + c] = static_cast<unsigned char>(std::lrint(v * 255.0f));
-                    }
-                }
+                    int remaining = std::min(previewChunk, numPixels - previewCursor);
 
-                previewCursor += remaining;
-                if (previewCursor >= numPixels)
-                {
-                    std::shuffle(previewOrder.begin(), previewOrder.end(), rng);
-                    previewCursor = 0;
-                }
-            }
-            else if (!saved)
-            {
-                for (int p = 0; p < numPixels; ++p)
-                {
-                    std::vector<float> inp(2);
-                    std::copy_n(coords.begin() + p*2, 2, inp.begin());
-                    std::vector<float> out = net.predict(inp);
-                    int idx = p * channels;
-                    for (int c = 0; c < channels; ++c) {
-                        float v = clamp01(out[c]);
-                        preview[idx + c] = static_cast<unsigned char>(std::lrint(v * 255.0f));
+                    // --- Batch predict for this preview chunk ---
+                    if (remaining > 0)
+                    {
+                        // Prepare input block (raw coords) for the chunk
+                        // Each sample is 2 floats (x,y)
+                        std::vector<float> inputBlock;
+                        inputBlock.reserve((size_t)remaining * 2);
+                        for (int i = 0; i < remaining; ++i)
+                        {
+                            int p = previewOrder[previewCursor + i];
+                            inputBlock.push_back(coords[p * 2 + 0]);
+                            inputBlock.push_back(coords[p * 2 + 1]);
+                        }
+
+                        // Predict all at once (returns remaining * channels floats)
+                        std::vector<float> outputs = net.predict(inputBlock);
+
+                        // Copy outputs into preview buffer
+                        for (int i = 0; i < remaining; ++i)
+                        {
+                            int p = previewOrder[previewCursor + i];
+                            int outOff = i * channels;
+                            int idx = p * channels;
+                            for (int c = 0; c < channels; ++c) {
+                                float v = clamp01(outputs[outOff + c]);
+                                preview[idx + c] = static_cast<unsigned char>(std::lrint(v * 255.0f));
+                            }
+                        }
+                    }
+
+                    previewCursor += remaining;
+                    if (previewCursor >= numPixels)
+                    {
+                        std::shuffle(previewOrder.begin(), previewOrder.end(), rng);
+                        previewCursor = 0;
                     }
                 }
-                updateTexture(tex, width, height, preview.data());
-                net.saveArchitecture("src/examples/image_model.pnn");
-                std::cout << "Training complete. Saved model.\n";
-                saved = true;
+                else if (!saved)
+                {
+                    std::vector<float> allOutputs = net.predict(coords);
+
+                    for (int p = 0; p < numPixels; ++p)
+                    {
+                        int outOff = p * channels;
+                        int idx = p * channels;
+                        for (int c = 0; c < channels; ++c) {
+                            float v = clamp01(allOutputs[outOff + c]);
+                            preview[idx + c] = static_cast<unsigned char>(std::lrint(v * 255.0f));
+                        }
+                    }
+
+                    updateTexture(tex, width, height, preview.data());
+                    net.saveArchitecture("src/examples/image_model.pnn");
+                    std::cout << "Training complete. Saved model.\n";
+                    saved = true;
+                }
             }
 
             updateTexture(tex, width, height, preview.data());
@@ -198,12 +220,12 @@ int main()
             ImGui::Image((void*)(intptr_t)tex, ImVec2(width * scale, height * scale));
             ImGui::End();
 
-            for (int s = 0; s < trainStepsPerFrame && currentEpoch < epochs; ++s)
+            if (currentEpoch < epochs)
             {
                 net.train();
                 currentEpoch++;
+                loss = net.getLoss();
             }
-            loss = net.getLoss();
 
             ImGui::Render();
             int display_w, display_h;
@@ -215,7 +237,6 @@ int main()
             glfwSwapBuffers(window);
         }
 
-        // cleanup
         ImGui_ImplOpenGL3_Shutdown();
         ImGui_ImplGlfw_Shutdown();
         ImGui::DestroyContext();

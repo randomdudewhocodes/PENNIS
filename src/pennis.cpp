@@ -424,7 +424,7 @@ void PENNIS::train()
         );
     }
 
-    recordForwardBatchCommandBuffer();
+    recordForwardCommandBuffer();
 
     {
         std::vector<VkBufferMemoryBarrier> bufBarriers;
@@ -501,72 +501,85 @@ void PENNIS::train()
 
 std::vector<float> PENNIS::predict(const std::vector<float>& inputData)
 {
-    uploadInputs(inputData);
-
-    vkResetCommandBuffer(computeCommandBuffer, 0);
-
-    VkCommandBufferBeginInfo beginInfo{};
-    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-
-    if (vkBeginCommandBuffer(computeCommandBuffer, &beginInfo) != VK_SUCCESS)
-        throw std::runtime_error("failed to begin recording compute command buffer!");
-
-    recordForwardCommandBuffer();
-
-    if (vkEndCommandBuffer(computeCommandBuffer) != VK_SUCCESS)
-        throw std::runtime_error("failed to end recording compute command buffer!");
-
-    computeSubmission();
-
-    Layer& outLayer = layers.back();
-    uint32_t outputSize = outLayer.outSize;
-
-    std::vector<float> output(outputSize);
-    readbackFromDeviceBuffer(outLayer.output, output.data(), outputSize * sizeof(float));
-
-    return output;
-}
-
-std::vector<float> PENNIS::predictBatch(const std::vector<float>& inputData)
-{
     if (layers.empty()) return {};
 
-    Layer& inLayer = layers.front();
-    uint32_t inSize = inLayer.inSize;
+    uint32_t sampleInputDim = ffEnabled ? (uint32_t)ff_inputDim : layers.front().inSize;
+    if (inputData.size() % sampleInputDim != 0)
+        throw std::runtime_error("predictBatch: input size must be a multiple of input-dimension");
+
+    uint32_t totalSamples = static_cast<uint32_t>(inputData.size() / sampleInputDim);
+    if (totalSamples == 0) return {};
+
     uint32_t outSize = layers.back().outSize;
-    uint32_t expectedSize = batchSize * inSize;
-    if (inputData.size() == expectedSize)
+    std::vector<float> allOutputs((size_t)totalSamples * outSize);
+
+    std::vector<float> chunkInputs;
+    std::vector<float> chunkOutputs;
+
+    for (uint32_t start = 0; start < totalSamples; start += batchSize)
     {
-        uploadInputs(inputData);
+        uint32_t curBatch = std::min(batchSize, totalSamples - start);
+
+        chunkInputs.clear();
+        chunkInputs.reserve((size_t)curBatch * sampleInputDim);
+        auto itBegin = inputData.begin() + (size_t)start * sampleInputDim;
+        auto itEnd   = itBegin + (size_t)curBatch * sampleInputDim;
+        chunkInputs.insert(chunkInputs.end(), itBegin, itEnd);
+
+        uploadInputs(chunkInputs);
+
+        vkResetCommandBuffer(computeCommandBuffer, 0);
+
+        VkCommandBufferBeginInfo beginInfo{};
+        beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vkBeginCommandBuffer(computeCommandBuffer, &beginInfo);
+
+        vkCmdBindPipeline(computeCommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, forwardPipeline);
+
+        for (size_t i = 0; i < layers.size(); ++i)
+        {
+            Layer& L = layers[i];
+
+            vkCmdBindDescriptorSets(
+                computeCommandBuffer,
+                VK_PIPELINE_BIND_POINT_COMPUTE,
+                forwardPipelineLayout,
+                0, 1, &forwardDescriptorSets[i],
+                0, nullptr);
+
+            struct Push { uint32_t inSize, outSize, batchSize, actType; };
+            Push push = { L.inSize, L.outSize, curBatch, L.actType };
+            vkCmdPushConstants(computeCommandBuffer, forwardPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+
+            uint32_t groups = (L.outSize * curBatch - 1) / workgroupSize + 1;
+            vkCmdDispatch(computeCommandBuffer, groups, 1, 1);
+
+            if (i + 1 < layers.size())
+            {
+                auto memBarrier = makeBarrier(L.output.buffer);
+                vkCmdPipelineBarrier(
+                    computeCommandBuffer,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    0,
+                    0, nullptr,
+                    1, &memBarrier,
+                    0, nullptr
+                );
+            }
+        }
+
+        vkEndCommandBuffer(computeCommandBuffer);
+        computeSubmission();
+
+        chunkOutputs.resize((size_t)curBatch * outSize);
+        readbackFromDeviceBuffer(layers.back().output, chunkOutputs.data(), (VkDeviceSize)chunkOutputs.size() * sizeof(float));
+
+        std::copy(chunkOutputs.begin(), chunkOutputs.end(), allOutputs.begin() + (size_t)start * outSize);
     }
-    else
-    {
-        throw std::runtime_error("predictBatch: input size must be batchSize * inSize");
-    }
 
-    vkResetCommandBuffer(computeCommandBuffer, 0);
-
-    VkCommandBufferBeginInfo beginInfo{};
-    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-
-    if (vkBeginCommandBuffer(computeCommandBuffer, &beginInfo) != VK_SUCCESS)
-        throw std::runtime_error("failed to begin recording compute command buffer!");
-
-    recordForwardBatchCommandBuffer();
-
-    if (vkEndCommandBuffer(computeCommandBuffer) != VK_SUCCESS)
-        throw std::runtime_error("failed to end recording compute command buffer!");
-
-    computeSubmission();
-
-    Layer& outLayer = layers.back();
-    uint32_t totalOutputSize = batchSize * outSize;
-    std::vector<float> output(totalOutputSize);
-    readbackFromDeviceBuffer(outLayer.output, output.data(), (VkDeviceSize)totalOutputSize * sizeof(float));
-
-    return output;
+    return allOutputs;
 }
 
 void PENNIS::saveArchitecture(const std::string& filename)
@@ -1525,44 +1538,6 @@ void PENNIS::recordSamplerCommandBuffer()
 }
 
 void PENNIS::recordForwardCommandBuffer()
-{
-    vkCmdBindPipeline(computeCommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, forwardPipeline);
-
-    for (size_t i = 0; i < layers.size(); ++i)
-    {
-        Layer& L = layers[i];
-
-        vkCmdBindDescriptorSets(
-            computeCommandBuffer,
-            VK_PIPELINE_BIND_POINT_COMPUTE,
-            forwardPipelineLayout,
-            0, 1, &forwardDescriptorSets[i],
-            0, nullptr);
-
-        struct Push { uint32_t inSize, outSize, batchSize, actType; };
-        Push push = { L.inSize, L.outSize, 1, L.actType };
-        vkCmdPushConstants(computeCommandBuffer, forwardPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
-
-        uint32_t groups = (L.outSize - 1) / workgroupSize + 1;
-        vkCmdDispatch(computeCommandBuffer, groups, 1, 1);
-
-        if (i + 1 < layers.size())
-        {
-            auto memBarrier = makeBarrier(L.output.buffer);
-            vkCmdPipelineBarrier(
-                computeCommandBuffer,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                0,
-                0, nullptr,
-                1, &memBarrier,
-                0, nullptr
-            );
-        }
-    }
-}
-
-void PENNIS::recordForwardBatchCommandBuffer()
 {
     vkCmdBindPipeline(computeCommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, forwardPipeline);
 

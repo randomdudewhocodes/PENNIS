@@ -587,24 +587,20 @@ void PENNIS::saveArchitecture(const std::string& filename)
     std::ofstream ofs(filename, std::ios::binary);
     if (!ofs.is_open()) throw std::runtime_error("saveArchitecture: failed to open file");
 
+    // bump file format version to 2 because we will also save weights/biases
     const uint32_t magic = 0x504E4E53;
-    const uint32_t version = 1;
+    const uint32_t version = 2;
     ofs.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
     ofs.write(reinterpret_cast<const char*>(&version), sizeof(version));
 
     std::vector<uint32_t> layerSizes;
     if (ffEnabled)
-    {
         layerSizes.push_back((uint32_t)ff_inputDim);
-    }
     else
-    {
         layerSizes.push_back(layers.front().inSize);
-    }
+
     for (size_t i = 0; i < layers.size(); ++i)
-    {
         layerSizes.push_back(layers[i].outSize);
-    }
 
     uint32_t layerCount = (uint32_t)layerSizes.size();
     ofs.write(reinterpret_cast<const char*>(&layerCount), sizeof(layerCount));
@@ -637,6 +633,27 @@ void PENNIS::saveArchitecture(const std::string& filename)
             ofs.write(reinterpret_cast<const char*>(ff_B.data()), (size_t)Bcount * sizeof(float));
     }
 
+    for (size_t i = 0; i < layers.size(); ++i)
+    {
+        const Layer& L = layers[i];
+        uint32_t wCount = (uint32_t)((size_t)L.inSize * (size_t)L.outSize);
+        uint32_t bCount = (uint32_t)L.outSize;
+
+        // read device buffer into cpu vector
+        std::vector<float> weights((size_t)wCount);
+        if (wCount)
+            readbackFromDeviceBuffer(const_cast<Buffer&>(L.weights), weights.data(), (VkDeviceSize)wCount * sizeof(float));
+        std::vector<float> biases((size_t)bCount);
+        if (bCount)
+            readbackFromDeviceBuffer(const_cast<Buffer&>(L.biases), biases.data(), (VkDeviceSize)bCount * sizeof(float));
+
+        ofs.write(reinterpret_cast<const char*>(&wCount), sizeof(wCount));
+        if (wCount) ofs.write(reinterpret_cast<const char*>(weights.data()), (size_t)wCount * sizeof(float));
+
+        ofs.write(reinterpret_cast<const char*>(&bCount), sizeof(bCount));
+        if (bCount) ofs.write(reinterpret_cast<const char*>(biases.data()), (size_t)bCount * sizeof(float));
+    }
+
     ofs.close();
 }
 
@@ -651,7 +668,7 @@ PENNIS* PENNIS::loadFromFile(const std::string& filename)
 
     uint32_t version = 0;
     ifs.read(reinterpret_cast<char*>(&version), sizeof(version));
-    if (version != 1) throw std::runtime_error("loadFromFile: unsupported version");
+    if (version != 1 && version != 2) throw std::runtime_error("loadFromFile: unsupported version");
 
     uint32_t layerCount = 0;
     ifs.read(reinterpret_cast<char*>(&layerCount), sizeof(layerCount));
@@ -704,8 +721,6 @@ PENNIS* PENNIS::loadFromFile(const std::string& filename)
         }
     }
 
-    ifs.close();
-
     PENNIS* newNet = nullptr;
     try
     {
@@ -720,6 +735,33 @@ PENNIS* PENNIS::loadFromFile(const std::string& filename)
             newNet->ff_sigma = file_ff_sigma;
             newNet->ff_includeInput = file_ff_includeInput;
             newNet->ff_mappedDim = (file_ff_includeInput ? file_ff_inputDim : 0) + 2 * file_ff_numBands;
+        }
+
+        if (version == 2)
+        {
+            for (size_t i = 0; i < newNet->layers.size(); ++i)
+            {
+                uint32_t wCount = 0;
+                ifs.read(reinterpret_cast<char*>(&wCount), sizeof(wCount));
+                std::vector<float> weights;
+                if (wCount)
+                {
+                    weights.resize((size_t)wCount);
+                    ifs.read(reinterpret_cast<char*>(weights.data()), (size_t)wCount * sizeof(float));
+                    // upload to device
+                    newNet->uploadToDeviceBuffer(weights.data(), (VkDeviceSize)wCount * sizeof(float), newNet->layers[i].weights);
+                }
+
+                uint32_t bCount = 0;
+                ifs.read(reinterpret_cast<char*>(&bCount), sizeof(bCount));
+                std::vector<float> biases;
+                if (bCount)
+                {
+                    biases.resize((size_t)bCount);
+                    ifs.read(reinterpret_cast<char*>(biases.data()), (size_t)bCount * sizeof(float));
+                    newNet->uploadToDeviceBuffer(biases.data(), (VkDeviceSize)bCount * sizeof(float), newNet->layers[i].biases);
+                }
+            }
         }
     }
     catch (...)

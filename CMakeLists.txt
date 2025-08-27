@@ -110,3 +110,10 @@ foreach(EXAMPLE_FILE IN LISTS EXAMPLE_SOURCES)
     target_link_libraries(${EXAMPLE_NAME} PRIVATE pennis)
     add_dependencies(${EXAMPLE_NAME} shaders)
 endforeach()
+
+# ---------------- Zlib ----------------
+set(SKIP_INSTALL_ALL ON CACHE BOOL "" FORCE)
+
+add_subdirectory(${CMAKE_SOURCE_DIR}/zlib ${CMAKE_BINARY_DIR}/zlib EXCLUDE_FROM_ALL)
+
+target_link_libraries(pennis PUBLIC zlibstatic) 

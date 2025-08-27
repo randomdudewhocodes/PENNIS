@@ -1,4 +1,3 @@
-// patched_main.cpp
 #include "pennis.hpp"
 #include "imgui.h"
 #include "backends/imgui_impl_glfw.h"

@@ -39,7 +39,7 @@ function(add_shaders TARGET_NAME)
 
     set(SHADER_COMMANDS)
     set(SHADER_PRODUCTS)
-    set(SHADER_OUTPUT_DIR "${CMAKE_SOURCE_DIR}/shaders")
+    set(SHADER_OUTPUT_DIR "${CMAKE_SOURCE_DIR}/compiled shaders")
 
     foreach(SHADER_SOURCE IN LISTS SHADER_SOURCE_FILES)
         get_filename_component(SHADER_SOURCE_ABS "${SHADER_SOURCE}" ABSOLUTE)
@@ -101,9 +101,13 @@ else()
 endif()
 
 # ---------------- Examples ----------------
-file(GLOB EXAMPLE_SOURCES "${CMAKE_SOURCE_DIR}/src/examples/*.cpp")
+# Recursively find all .cpp files under src/examples
+file(GLOB_RECURSE EXAMPLE_SOURCES
+    "${CMAKE_SOURCE_DIR}/src/examples/*.cpp"
+)
 
 foreach(EXAMPLE_FILE IN LISTS EXAMPLE_SOURCES)
+    # Get executable name from filename (ignoring directories)
     get_filename_component(EXAMPLE_NAME "${EXAMPLE_FILE}" NAME_WE)
 
     add_executable(${EXAMPLE_NAME} ${EXAMPLE_FILE})
@@ -116,4 +120,4 @@ set(SKIP_INSTALL_ALL ON CACHE BOOL "" FORCE)
 
 add_subdirectory(${CMAKE_SOURCE_DIR}/zlib ${CMAKE_BINARY_DIR}/zlib EXCLUDE_FROM_ALL)
 
-target_link_libraries(pennis PUBLIC zlibstatic) 
+target_link_libraries(pennis PUBLIC zlibstatic)

@@ -1,10 +1,3 @@
-// demo_from_file.cpp
-// simple demo that loads a saved .pnn model using PENNIS::loadFromFile
-// and runs the "Live demo" drawing/predict UI similar to mnist_fitting.cpp.
-//
-// Requires: imgui, imgui_impl_glfw, imgui_impl_opengl3, GLFW, Vulkan runtime
-// and the compiled pennis.* (pennis.hpp / pennis.cpp) in your project.
-
 #include "pennis.hpp"
 #include "imgui.h"
 #include "backends/imgui_impl_glfw.h"
@@ -15,6 +8,22 @@
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
+
+inline float lineSegmentSDF(float px, float py,
+                            float ax, float ay,
+                            float bx, float by)
+{
+    float vx = px - ax;
+    float vy = py - ay;
+    float ux = bx - ax;
+    float uy = by - ay;
+    float len2 = ux*ux + uy*uy;
+    float t = (len2 > 0.0f) ? (vx*ux + vy*uy) / len2 : 0.0f;
+    t = std::clamp(t, 0.0f, 1.0f);
+    float dx = vx - t*ux;
+    float dy = vy - t*uy;
+    return std::sqrt(dx*dx + dy*dy);
+}
 
 int main()
 {
@@ -29,7 +38,7 @@ int main()
 
         PENNIS dummy(workgroupSize, batchSize, dummySizes, dummyActs, adamParams);
 
-        const std::string modelPath = "src/examples/mnist_model.pnn";
+        const std::string modelPath = "src/examples/trained models/mnist_model.pnn";
 
         PENNIS* net = nullptr;
         try {
@@ -66,6 +75,11 @@ int main()
         std::vector<float> demoPixels((size_t)demoSize * demoSize, 0.0f);
         int predictedDigit = -1;
         std::vector<float> lastProbs(10, 0.0f);
+
+        float brush_radius = 1.25f;
+        float brush_strength = 0.9f;
+
+        ImVec2 prevDrawPos(-1.0f, -1.0f);
 
         while (!glfwWindowShouldClose(window))
         {
@@ -119,25 +133,72 @@ int main()
                 ImVec2 mpos = io.MousePos;
                 float local_x = mpos.x - canvas_p0.x;
                 float local_y = mpos.y - canvas_p0.y;
-                int ix = int(local_x / cell);
-                int iy = int(local_y / cell);
-                if (ix >= 0 && ix < demoSize && iy >= 0 && iy < demoSize)
+                float fx = local_x / cell;
+                float fy = local_y / cell;
+
+                ImVec2 curPos(fx, fy);
+                if (prevDrawPos.x >= 0.0f && prevDrawPos.y >= 0.0f && (mouseDownL || mouseDownR))
                 {
-                    for (int dy = -1; dy <= 1; ++dy)
-                        for (int dx = -1; dx <= 1; ++dx)
-                        {
-                            int nx = ix + dx;
-                            int ny = iy + dy;
-                            if (nx >= 0 && nx < demoSize && ny >= 0 && ny < demoSize)
-                            {
-                                size_t idx = (size_t)ny * demoSize + (size_t)nx;
-                                if (mouseDownL)
-                                    demoPixels[idx] = std::min(1.0f, demoPixels[idx] + 0.35f);
-                                else if (mouseDownR)
-                                    demoPixels[idx] = std::max(0.0f, demoPixels[idx] - 0.35f);
-                            }
-                        }
+                    int y0 = std::max(0, int(std::floor(std::min(prevDrawPos.y, curPos.y) - brush_radius)));
+                    int y1 = std::min(demoSize - 1, int(std::ceil(std::max(prevDrawPos.y, curPos.y) + brush_radius)));
+                    int x0 = std::max(0, int(std::floor(std::min(prevDrawPos.x, curPos.x) - brush_radius)));
+                    int x1 = std::min(demoSize - 1, int(std::ceil(std::max(prevDrawPos.x, curPos.x) + brush_radius)));
+
+                    for (int yy = y0; yy <= y1; ++yy)
+                    for (int xx = x0; xx <= x1; ++xx)
+                    {
+                        float cx = (float)xx + 0.5f;
+                        float cy = (float)yy + 0.5f;
+
+                        float distp = lineSegmentSDF(cx, cy,
+                                                    prevDrawPos.x, prevDrawPos.y,
+                                                    curPos.x, curPos.y);
+
+                        if (distp > brush_radius) continue;
+
+                        float w = 1.0f - distp / brush_radius;
+                        w = w*w*(3.0f - 2.0f*w);
+                        float sign = mouseDownL ? 1.0f : -1.0f;
+                        float dt60 = (io.DeltaTime > 0.0f) ? (io.DeltaTime * 60.0f) : 1.0f;
+                        float delta = brush_strength * w * sign * dt60;
+
+                        size_t idx = size_t(yy) * demoSize + size_t(xx);
+                        demoPixels[idx] = std::clamp(demoPixels[idx] + delta, 0.0f, 1.0f);
+                    }
                 }
+                else
+                {
+                    int y0 = std::max(0, int(std::floor(fy - brush_radius)));
+                    int y1 = std::min(demoSize - 1, int(std::ceil(fy + brush_radius)));
+                    int x0 = std::max(0, int(std::floor(fx - brush_radius)));
+                    int x1 = std::min(demoSize - 1, int(std::ceil(fx + brush_radius)));
+
+                    for (int yy = y0; yy <= y1; ++yy)
+                    for (int xx = x0; xx <= x1; ++xx)
+                    {
+                        float cx = (float)xx + 0.5f;
+                        float cy = (float)yy + 0.5f;
+                        float dx = cx - fx;
+                        float dy = cy - fy;
+                        float distp = std::sqrt(dx*dx + dy*dy);
+                        if (distp > brush_radius) continue;
+
+                        float w = 1.0f - distp / brush_radius;
+                        w = w*w*(3.0f - 2.0f*w);
+                        float sign = mouseDownL ? 1.0f : -1.0f;
+                        float dt60 = (io.DeltaTime > 0.0f) ? (io.DeltaTime * 60.0f) : 1.0f;
+                        float delta = brush_strength * w * sign * dt60;
+
+                        size_t idx = size_t(yy) * demoSize + size_t(xx);
+                        demoPixels[idx] = std::clamp(demoPixels[idx] + delta, 0.0f, 1.0f);
+                    }
+                }
+
+                prevDrawPos = curPos;
+            }
+            else
+            {
+                prevDrawPos = ImVec2(-1.0f, -1.0f);
             }
 
             for (int y = 0; y < demoSize; ++y)
@@ -172,31 +233,33 @@ int main()
             ImGui::Text("Controls");
             ImGui::Separator();
 
+            ImGui::SliderFloat("Brush radius (cells)", &brush_radius, 0.25f, 4.0f, "%.2f");
+            ImGui::SliderFloat("Brush strength", &brush_strength, 0.05f, 2.0f, "%.2f");
+            ImGui::TextWrapped("Tip: hold left mouse to paint, right mouse to erase.");
+            ImGui::Separator();
+
             if (ImGui::Button("Clear", ImVec2(-1, 0))) {
                 std::fill(demoPixels.begin(), demoPixels.end(), 0.0f);
                 predictedDigit = -1;
                 std::fill(lastProbs.begin(), lastProbs.end(), 0.0f);
             }
 
-            if (ImGui::Button("Predict", ImVec2(-1, 0)))
-            {
-                std::vector<float> inp;
-                inp.reserve(demoSize * demoSize);
-                for (size_t i = 0; i < demoPixels.size(); ++i) inp.push_back(demoPixels[i]);
+            std::vector<float> inp;
+            inp.reserve(demoSize * demoSize);
+            for (size_t i = 0; i < demoPixels.size(); ++i) inp.push_back(demoPixels[i]);
 
-                try {
-                    std::vector<float> probs = net->predict(inp);
-                    if (probs.size() >= 10) {
-                        lastProbs = probs;
-                        int best = 0;
-                        for (int k = 1; k < 10; ++k) if (probs[k] > probs[best]) best = k;
-                        predictedDigit = best;
-                    } else {
-                        std::cerr << "predict() returned unexpected size: " << probs.size() << "\n";
-                    }
-                } catch (const std::exception &e) {
-                    std::cerr << "Exception in predict(): " << e.what() << "\n";
+            try {
+                std::vector<float> probs = net->predict(inp);
+                if (probs.size() >= 10) {
+                    lastProbs = probs;
+                    int best = 0;
+                    for (int k = 1; k < 10; ++k) if (probs[k] > probs[best]) best = k;
+                    predictedDigit = best;
+                } else {
+                    std::cerr << "predict() returned unexpected size: " << probs.size() << "\n";
                 }
+            } catch (const std::exception &e) {
+                std::cerr << "Exception in predict(): " << e.what() << "\n";
             }
 
             ImGui::Spacing();

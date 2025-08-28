@@ -1,4 +1,3 @@
-// mnist_fitting.cpp  -- modified: demo controls moved to right-side panel
 #include <zlib.h>
 #include "pennis.hpp"
 #include "imgui.h"
@@ -11,6 +10,8 @@
 #include <cfloat>
 #include <algorithm>
 #include <numeric>
+#include <random>
+#include <omp.h>
 
 bool readMNISTImages(const std::string &filename, std::vector<std::vector<uint8_t>> &images, int &numImages, int &rows, int &cols)
 {
@@ -106,21 +107,78 @@ bool readMNISTLabels(const std::string &filename, std::vector<uint8_t> &labels, 
     return true;
 }
 
-static std::vector<float> softmax(const std::vector<float>& v)
+inline float lineSegmentSDF(float px, float py,
+                            float ax, float ay,
+                            float bx, float by)
 {
-    if (v.empty()) return {};
-    float m = *std::max_element(v.begin(), v.end());
-    std::vector<float> exps(v.size());
-    double sum = 0.0;
-    for (size_t i = 0; i < v.size(); ++i) {
-        double e = std::exp(double(v[i]) - double(m));
-        exps[i] = (float)e;
-        sum += e;
-    }
-    if (sum == 0.0) sum = 1.0;
-    for (size_t i = 0; i < exps.size(); ++i) exps[i] /= (float)sum;
-    return exps;
+    float vx = px - ax;
+    float vy = py - ay;
+    float ux = bx - ax;
+    float uy = by - ay;
+    float len2 = ux*ux + uy*uy;
+    float t = (len2 > 0.0f) ? (vx*ux + vy*uy) / len2 : 0.0f;
+    t = std::clamp(t, 0.0f, 1.0f);
+    float dx = vx - t*ux;
+    float dy = vy - t*uy;
+    return std::sqrt(dx*dx + dy*dy);
 }
+
+static inline uint8_t sample_bilinear(const std::vector<uint8_t>& img, int rows, int cols, float x, float y)
+{
+    if (x < 0.0f || y < 0.0f || x > cols - 1 || y > rows - 1) return 0;
+    int x0 = int(std::floor(x));
+    int y0 = int(std::floor(y));
+    int x1 = x0 + 1;
+    int y1 = y0 + 1;
+    float wx = x - float(x0);
+    float wy = y - float(y0);
+
+    auto get = [&](int xx, int yy) -> uint8_t {
+        if (xx < 0 || yy < 0 || xx >= cols || yy >= rows) return 0;
+        return img[size_t(yy) * cols + xx];
+    };
+
+    float v00 = float(get(x0, y0));
+    float v10 = float(get(x1, y0));
+    float v01 = float(get(x0, y1));
+    float v11 = float(get(x1, y1));
+
+    float v0 = v00 * (1.0f - wx) + v10 * wx;
+    float v1 = v01 * (1.0f - wx) + v11 * wx;
+    float v  = v0  * (1.0f - wy) + v1  * wy;
+    int iv = int(std::round(v));
+    if (iv < 0) iv = 0;
+    if (iv > 255) iv = 255;
+    return (uint8_t)iv;
+}
+
+static std::vector<uint8_t> augmentImageAffine(const std::vector<uint8_t>& src, int rows, int cols, float tx, float ty, float scale, float angleDeg)
+{
+    std::vector<uint8_t> dst(size_t(rows) * cols, 0);
+    const float cx = (cols - 1) * 0.5f;
+    const float cy = (rows - 1) * 0.5f;
+    const float rad = angleDeg * 3.14159265358979323846f / 180.0f;
+    const float c = std::cos(rad);
+    const float s = std::sin(rad);
+
+    // parallelize rows with OpenMP. each thread writes distinct dst rows so this is safe.
+    for (int y = 0; y < rows; ++y)
+    {
+        for (int x = 0; x < cols; ++x)
+        {
+            float dx = float(x);
+            float dy = float(y);
+            float rx = dx - cx - tx;
+            float ry = dy - cy - ty;
+            float sx = ( c * rx + s * ry) / scale + cx;
+            float sy = (-s * rx + c * ry) / scale + cy;
+            dst[size_t(y) * cols + x] = sample_bilinear(src, rows, cols, sx, sy);
+        }
+    }
+    return dst;
+}
+
+// ------------------ end augmentation helpers ------------------
 
 int main()
 {
@@ -130,35 +188,83 @@ int main()
         std::vector<uint8_t> trainLabels, testLabels;
         int numTrainImages = 0, numTestImages = 0, rows = 0, cols = 0;
 
-        if (!readMNISTImages("src/examples/train-images-idx3-ubyte.gz", trainImages, numTrainImages, rows, cols)) return -1;
-        if (!readMNISTLabels("src/examples/train-labels-idx1-ubyte.gz", trainLabels, numTrainImages)) return -1;
-        if (!readMNISTImages("src/examples/t10k-images-idx3-ubyte.gz", testImages, numTestImages, rows, cols)) return -1;
-        if (!readMNISTLabels("src/examples/t10k-labels-idx1-ubyte.gz", testLabels, numTestImages)) return -1;
+        if (!readMNISTImages("src/examples/mnist training demo/train-images-idx3-ubyte.gz", trainImages, numTrainImages, rows, cols)) return -1;
+        if (!readMNISTLabels("src/examples/mnist training demo/train-labels-idx1-ubyte.gz", trainLabels, numTrainImages)) return -1;
+        if (!readMNISTImages("src/examples/mnist training demo/t10k-images-idx3-ubyte.gz", testImages, numTestImages, rows, cols)) return -1;
+        if (!readMNISTLabels("src/examples/mnist training demo/t10k-labels-idx1-ubyte.gz", testLabels, numTestImages)) return -1;
 
-        std::vector<uint32_t> layerSizes = {uint32_t(rows * cols), 256, 256, 10};
-        std::vector<uint32_t> actTypes = {Sigmoid, Sigmoid, Sigmoid};
+        std::vector<uint32_t> layerSizes = {uint32_t(rows * cols), 64, 64, 10};
+        std::vector<uint32_t> actTypes = {Tanh, Tanh, Sigmoid};
         AdamParams adamParams = {0.9f, 0.999f, 1e-8f, 0.001f, 0.01f};
 
-        const int batchSize = 300;
+        const int batchSize = 600;
         PENNIS pennis(256, batchSize, layerSizes, actTypes, adamParams);
 
-        const int epochs = 5000;
+        const int epochs = 30000;
         int currentEpoch = 0;
         bool saved = false;
 
         std::vector<float> trainInput, trainTarget;
         std::vector<float> testInput;
 
-        trainInput.reserve(size_t(numTrainImages) * rows * cols);
-        trainTarget.reserve(size_t(numTrainImages) * 10);
-        for (int i = 0; i < numTrainImages; i++)
-        {
-            for (int j = 0; j < rows * cols; j++)
-                trainInput.push_back(float(trainImages[i][j]) / 255.0f);
+        const int aug_per_image = 14;
 
-            for (int j = 0; j < 10; j++)
-                trainTarget.push_back(trainLabels[i] == j ? 1.0f : 0.0f);
+        size_t totalSamples = size_t(numTrainImages) * (1 + aug_per_image);
+
+        trainInput.clear();
+        trainTarget.clear();
+        trainInput.resize(totalSamples * size_t(rows) * cols);
+        trainTarget.resize(totalSamples * 10);
+
+        std::atomic<size_t> progressCounter(0);
+        #pragma omp parallel for schedule(dynamic)
+        for (int i = 0; i < numTrainImages; ++i)
+        {
+            std::mt19937 rng_local(i);
+            std::uniform_real_distribution<float> tdist_local(-5.0f, 5.0f);
+            std::uniform_real_distribution<float> sdist_local(-0.2f, 0.2f);
+            std::uniform_real_distribution<float> rdist_local(-2.0f, 2.0f);
+            std::uniform_real_distribution<float> gdist_local(-0.7f, 0.7f);
+
+            for (int a = 0; a <= aug_per_image; ++a)
+            {
+                size_t sampleIndex = size_t(i) * (1 + aug_per_image) + size_t(a);
+                size_t inputOffset = sampleIndex * size_t(rows) * cols;
+                size_t targetOffset = sampleIndex * 10;
+                size_t pixelCount = size_t(rows) * cols;
+
+                if (a == 0)
+                {
+                    for (int j = 0; j < rows * cols; ++j)
+                        trainInput[inputOffset + j] = float(trainImages[i][j]) / 255.0f;
+                }
+                else
+                {
+                    float tx = tdist_local(rng_local);
+                    float ty = tdist_local(rng_local);
+                    float scale = sdist_local(rng_local);
+                    float rot = rdist_local(rng_local);
+                    float gamma = gdist_local(rng_local);
+
+                    std::vector<uint8_t> aug = augmentImageAffine(trainImages[i], rows, cols, tx, ty, exp(scale), rot);
+                    for (int j = 0; j < rows * cols; ++j)
+                        trainInput[inputOffset + j] = pow(float(aug[j]) / 255.0f, exp(gamma));
+                }
+
+                for (int k = 0; k < 10; ++k)
+                    trainTarget[targetOffset + k] = (trainLabels[i] == k) ? 1.0f : 0.0f;
+                
+                size_t done = ++progressCounter;
+                if (done % 5000 == 0 || done == totalSamples) {
+                    #pragma omp critical
+                    {
+                        std::cout << "Loaded " << done << "/" << totalSamples << " images\n";
+                    }
+                }
+            }
         }
+
+        std::cout << "All training images loaded." << std::endl;
 
         pennis.uploadTrainInputs(trainInput);
         pennis.uploadTrainTargets(trainTarget);
@@ -204,6 +310,11 @@ int main()
         std::vector<float> demoPixels((size_t)demoSize * demoSize, 0.0f);
         int predictedDigit = -1;
         std::vector<float> lastProbs(10, 0.0f);
+
+        float brush_radius = 1.25f;
+        float brush_strength = 0.9f;
+
+        ImVec2 prevDrawPos(-1.0f, -1.0f);
 
         while (!glfwWindowShouldClose(window))
         {
@@ -279,7 +390,7 @@ int main()
                 {
                     if (currentEpoch >= epochs)
                     {
-                        pennis.saveArchitecture("src/examples/mnist_model.pnn");
+                        pennis.saveArchitecture("src/examples/trained models/mnist_model.pnn");
                         std::cout << "Training complete. Saved model.\n";
                         saved = true;
                     }
@@ -356,25 +467,74 @@ int main()
                     ImVec2 mpos = io.MousePos;
                     float local_x = mpos.x - canvas_p0.x;
                     float local_y = mpos.y - canvas_p0.y;
-                    int ix = int(local_x / cell);
-                    int iy = int(local_y / cell);
-                    if (ix >= 0 && ix < demoSize && iy >= 0 && iy < demoSize)
+                    float fx = local_x / cell;
+                    float fy = local_y / cell;
+
+                    ImVec2 curPos(fx, fy);
+                    ImVec2 startPos = curPos;
+                    if (prevDrawPos.x >= 0.0f && prevDrawPos.y >= 0.0f && (mouseDownL || mouseDownR))
                     {
-                        for (int dy = -1; dy <= 1; ++dy)
-                        for (int dx = -1; dx <= 1; ++dx)
+                        int y0 = std::max(0, int(std::floor(std::min(prevDrawPos.y, curPos.y) - brush_radius)));
+                        int y1 = std::min(demoSize - 1, int(std::ceil(std::max(prevDrawPos.y, curPos.y) + brush_radius)));
+                        int x0 = std::max(0, int(std::floor(std::min(prevDrawPos.x, curPos.x) - brush_radius)));
+                        int x1 = std::min(demoSize - 1, int(std::ceil(std::max(prevDrawPos.x, curPos.x) + brush_radius)));
+
+                        for (int yy = y0; yy <= y1; ++yy)
+                        for (int xx = x0; xx <= x1; ++xx)
                         {
-                            int nx = ix + dx;
-                            int ny = iy + dy;
-                            if (nx >= 0 && nx < demoSize && ny >= 0 && ny < demoSize)
-                            {
-                                size_t idx = (size_t)ny * demoSize + (size_t)nx;
-                                if (mouseDownL)
-                                    demoPixels[idx] = std::min(1.0f, demoPixels[idx] + 0.35f);
-                                else if (mouseDownR)
-                                    demoPixels[idx] = std::max(0.0f, demoPixels[idx] - 0.35f);
-                            }
+                            float cx = (float)xx + 0.5f;
+                            float cy = (float)yy + 0.5f;
+
+                            float distp = lineSegmentSDF(cx, cy,
+                                                        prevDrawPos.x, prevDrawPos.y,
+                                                        curPos.x, curPos.y);
+
+                            if (distp > brush_radius) continue;
+
+                            float w = 1.0f - distp / brush_radius;
+                            w = w*w*(3.0f - 2.0f*w); // smooth falloff
+                            float sign = mouseDownL ? 1.0f : -1.0f;
+                            float dt60 = (io.DeltaTime > 0.0f) ? (io.DeltaTime * 60.0f) : 1.0f;
+                            float delta = brush_strength * w * sign * dt60;
+
+                            size_t idx = size_t(yy) * demoSize + size_t(xx);
+                            demoPixels[idx] = std::clamp(demoPixels[idx] + delta, 0.0f, 1.0f);
                         }
                     }
+                    else
+                    {
+                        // Fallback: single point stroke when no prevDrawPos yet
+                        int y0 = std::max(0, int(std::floor(fy - brush_radius)));
+                        int y1 = std::min(demoSize - 1, int(std::ceil(fy + brush_radius)));
+                        int x0 = std::max(0, int(std::floor(fx - brush_radius)));
+                        int x1 = std::min(demoSize - 1, int(std::ceil(fx + brush_radius)));
+
+                        for (int yy = y0; yy <= y1; ++yy)
+                        for (int xx = x0; xx <= x1; ++xx)
+                        {
+                            float cx = (float)xx + 0.5f;
+                            float cy = (float)yy + 0.5f;
+                            float dx = cx - fx;
+                            float dy = cy - fy;
+                            float distp = std::sqrt(dx*dx + dy*dy);
+                            if (distp > brush_radius) continue;
+
+                            float w = 1.0f - distp / brush_radius;
+                            w = w*w*(3.0f - 2.0f*w);
+                            float sign = mouseDownL ? 1.0f : -1.0f;
+                            float dt60 = (io.DeltaTime > 0.0f) ? (io.DeltaTime * 60.0f) : 1.0f;
+                            float delta = brush_strength * w * sign * dt60;
+
+                            size_t idx = size_t(yy) * demoSize + size_t(xx);
+                            demoPixels[idx] = std::clamp(demoPixels[idx] + delta, 0.0f, 1.0f);
+                        }
+                    }
+
+                    prevDrawPos = curPos;
+                }
+                else
+                {
+                    prevDrawPos = ImVec2(-1.0f, -1.0f);
                 }
 
                 for (int y = 0; y < demoSize; ++y)
@@ -382,8 +542,7 @@ int main()
                     for (int x = 0; x < demoSize; ++x)
                     {
                         size_t idx = (size_t)y * demoSize + (size_t)x;
-                        float v = demoPixels[idx]; // 0..1
-                        // make color: 1 -> black; 0 -> white
+                        float v = demoPixels[idx];
                         unsigned int c = (unsigned int)std::round(255.0f * v);
                         ImU32 col = IM_COL32(c, c, c, 255);
                         ImVec2 p0 = ImVec2(canvas_p0.x + x * cell, canvas_p0.y + y * cell);
@@ -409,32 +568,34 @@ int main()
                 ImGui::Text("Controls");
                 ImGui::Separator();
 
+                ImGui::SliderFloat("Brush radius (cells)", &brush_radius, 0.25f, 4.0f, "%.2f");
+                ImGui::SliderFloat("Brush strength", &brush_strength, 0.05f, 2.0f, "%.2f");
+                ImGui::TextWrapped("Tip: hold left mouse to paint, right mouse to erase.");
+                ImGui::Separator();
+
                 if (ImGui::Button("Clear", ImVec2(-1, 0))) {
                     std::fill(demoPixels.begin(), demoPixels.end(), 0.0f);
                     predictedDigit = -1;
                     std::fill(lastProbs.begin(), lastProbs.end(), 0.0f);
                 }
 
-                if (ImGui::Button("Predict", ImVec2(-1, 0)))
-                {
-                    std::vector<float> inp;
-                    inp.reserve(demoSize * demoSize);
-                    for (size_t i = 0; i < demoPixels.size(); ++i)
-                        inp.push_back(demoPixels[i]);
+                std::vector<float> inp;
+                inp.reserve(demoSize * demoSize);
+                for (size_t i = 0; i < demoPixels.size(); ++i)
+                    inp.push_back(demoPixels[i]);
 
-                    try {
-                        std::vector<float> probs = pennis.predict(inp);
-                        if (probs.size() >= 10) {
-                            lastProbs = probs;
-                            int best = 0;
-                            for (int k = 1; k < 10; ++k) if (probs[k] > probs[best]) best = k;
-                            predictedDigit = best;
-                        } else {
-                            std::cerr << "predict() returned unexpected size: " << probs.size() << "\n";
-                        }
-                    } catch (const std::exception &e) {
-                        std::cerr << "Exception in predict(): " << e.what() << "\n";
+                try {
+                    std::vector<float> probs = pennis.predict(inp);
+                    if (probs.size() >= 10) {
+                        lastProbs = probs;
+                        int best = 0;
+                        for (int k = 1; k < 10; ++k) if (probs[k] > probs[best]) best = k;
+                        predictedDigit = best;
+                    } else {
+                        std::cerr << "predict() returned unexpected size: " << probs.size() << "\n";
                     }
+                } catch (const std::exception &e) {
+                    std::cerr << "Exception in predict(): " << e.what() << "\n";
                 }
 
                 ImGui::Spacing();

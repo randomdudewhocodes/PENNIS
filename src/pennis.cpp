@@ -79,11 +79,11 @@ PENNIS::PENNIS(const uint32_t workgroupSize,
     pickPhysicalDevice();
     createLogicalDevice();
     createComputeDescriptorSetLayout();
-    createComputePipeline("shaders/sampler.spv",  samplerPipelineLayout,  samplerPipeline);
-    createComputePipeline("shaders/forward.spv",  forwardPipelineLayout,  forwardPipeline);
-    createComputePipeline("shaders/backprop.spv", backpropPipelineLayout, backpropPipeline);
-    createComputePipeline("shaders/adam.spv",     adamPipelineLayout,     adamPipeline);
-    createComputePipeline("shaders/reduce.spv",   reducePipelineLayout,   reducePipeline);
+    createComputePipeline("compiled shaders/sampler.spv",  samplerPipelineLayout,  samplerPipeline);
+    createComputePipeline("compiled shaders/forward.spv",  forwardPipelineLayout,  forwardPipeline);
+    createComputePipeline("compiled shaders/backprop.spv", backpropPipelineLayout, backpropPipeline);
+    createComputePipeline("compiled shaders/adam.spv",     adamPipelineLayout,     adamPipeline);
+    createComputePipeline("compiled shaders/reduce.spv",   reducePipelineLayout,   reducePipeline);
     createCommandPool();
     createShaderStorageBuffers();
     createDescriptorPool();

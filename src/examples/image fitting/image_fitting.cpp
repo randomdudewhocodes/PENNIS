@@ -42,7 +42,7 @@ int main()
     {
         int width = 0, height = 0, channels = 0;
         const int desired_channels = 4;
-        unsigned char* data = stbi_load("src/examples/image.jpg", &width, &height, &channels, desired_channels);
+        unsigned char* data = stbi_load("src/examples/image fitting/image.jpg", &width, &height, &channels, desired_channels);
 
         if (!data)
         {
@@ -66,7 +66,7 @@ int main()
 
         const uint32_t workgroupSize = 512;
         const int      batchSize     = 128;
-        const int      epochs        = 5000;
+        const int      epochs        = 2000;
 
         std::mt19937 rng{ std::random_device{}() };
 
@@ -135,7 +135,7 @@ int main()
 
                 if(currentEpoch == epochs)
                 {
-                    net.saveArchitecture("src/examples/image_model.pnn");
+                    net.saveArchitecture("src/examples/trained models/image_model.pnn");
                     std::cout << "Training complete. Saved model.\n";
                     saved = true;
                 }

@@ -70,35 +70,12 @@ int main()
 
             if (currentEpoch == epochs && !saved)
             {
-                pennis.saveArchitecture("src/examples/sine_model.pnn");
+                pennis.saveArchitecture("src/examples/trained models/sine_model.pnn");
                 std::cout << "Training complete. Saved model.\n";
                 saved = true;
             }
 
-            {
-                std::vector<float> batchOut = pennis.predict(trainInput);
-
-                int outPerSample = 1;
-                if (numSamples > 0)
-                {
-                    if (!batchOut.empty())
-                        outPerSample = static_cast<int>(batchOut.size()) / numSamples;
-                    else
-                        outPerSample = 0;
-                }
-
-                if (outPerSample <= 0)
-                {
-                    for (int i = 0; i < numSamples; ++i) nn[i] = 0.0f;
-                }
-                else
-                {
-                    for (int i = 0; i < numSamples; ++i)
-                    {
-                        nn[i] = batchOut[i * outPerSample + 0];
-                    }
-                }
-            }
+            std::vector<float> nn = pennis.predict(trainInput);
 
             ImVec2 windowSize = ImGui::GetIO().DisplaySize;
             float fontSize = ImGui::GetFontSize();
@@ -155,8 +132,8 @@ int main()
                 pennis.train();
                 currentEpoch++;
             }
-
-            loss = pennis.getLoss();
+            
+            if (!saved) loss = pennis.getLoss();
 
             ImGui::Render();
             int display_w, display_h;

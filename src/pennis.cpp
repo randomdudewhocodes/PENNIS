@@ -144,6 +144,9 @@ PENNIS::~PENNIS()
     destroyBuffer(indexBuffer);
     destroyBuffer(targetBuffer);
 
+    destroyBuffer(stagingUploadBuffer);
+    destroyBuffer(stagingReadBuffer);
+
     vkDestroyFence(device, fence, nullptr);
     
     vkDestroyCommandPool(device, commandPool, nullptr);
@@ -183,46 +186,149 @@ void PENNIS::createDeviceLocalBufferWithStaging(const void* srcData, VkDeviceSiz
     vkFreeMemory(device, staging.memory, nullptr);
 }
 
+void PENNIS::createPersistentStagingBuffers(VkDeviceSize maxUploadBytes, VkDeviceSize maxReadBytes)
+{
+    stagingUploadSize = maxUploadBytes;
+    stagingReadSize = maxReadBytes;
+
+    if (stagingUploadBuffer.buffer != VK_NULL_HANDLE) {
+        vkDeviceWaitIdle(device);
+        destroyBuffer(stagingUploadBuffer);
+    }
+    if (stagingReadBuffer.buffer != VK_NULL_HANDLE) {
+        vkDeviceWaitIdle(device);
+        destroyBuffer(stagingReadBuffer);
+    }
+
+    createBuffer(stagingUploadSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                 stagingUploadBuffer);
+
+    createBuffer(stagingReadSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                 stagingReadBuffer);
+}
+
+void PENNIS::ensurePersistentStagingUploadSize(VkDeviceSize required) {
+    if (required <= stagingUploadSize && stagingUploadBuffer.buffer != VK_NULL_HANDLE) return;
+
+    VkDeviceSize newSize = std::max(required, (stagingUploadSize == 0 ? required : stagingUploadSize * 2));
+
+    if (stagingUploadBuffer.buffer != VK_NULL_HANDLE) {
+        vkDeviceWaitIdle(device);
+        destroyBuffer(stagingUploadBuffer);
+    }
+
+    stagingUploadSize = newSize;
+    createBuffer(stagingUploadSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                 stagingUploadBuffer);
+}
+
+void PENNIS::ensurePersistentStagingReadSize(VkDeviceSize required) {
+    if (required <= stagingReadSize && stagingReadBuffer.buffer != VK_NULL_HANDLE) return;
+
+    VkDeviceSize newSize = std::max(required, (stagingReadSize == 0 ? required : stagingReadSize * 2));
+
+    if (stagingReadBuffer.buffer != VK_NULL_HANDLE) {
+        vkDeviceWaitIdle(device);
+        destroyBuffer(stagingReadBuffer);
+    }
+
+    stagingReadSize = newSize;
+    createBuffer(stagingReadSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                 stagingReadBuffer);
+}
+
 void PENNIS::uploadToDeviceBuffer(const void* srcData, VkDeviceSize size, Buffer& dstBuf)
 {
-    Buffer staging;
-    createBuffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                 staging);
+    if (size == 0 || srcData == nullptr) return;
 
-    void* data;
-    vkMapMemory(device, staging.memory, 0, size, 0, &data);
-    memcpy(data, srcData, (size_t)size);
-    vkUnmapMemory(device, staging.memory);
+    ensurePersistentStagingUploadSize(size);
+
+    bool usePersistent = (stagingUploadBuffer.buffer != VK_NULL_HANDLE) && (size <= stagingUploadSize);
+
+    Buffer tempStaging{};
+    Buffer* staging = nullptr;
+    VkDeviceSize stagingOffset = 0;
+
+    if (usePersistent) {
+        staging = &stagingUploadBuffer;
+    } else {
+        createBuffer(size,
+                     VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                     tempStaging);
+        staging = &tempStaging;
+    }
+
+    void* mapPtr = nullptr;
+    VkResult res = vkMapMemory(device, staging->memory, stagingOffset, size, 0, &mapPtr);
+    if (res != VK_SUCCESS || mapPtr == nullptr) {
+        if (!usePersistent) destroyBuffer(tempStaging);
+        throw std::runtime_error("vkMapMemory failed in uploadToDeviceBuffer");
+    }
+    memcpy(mapPtr, srcData, static_cast<size_t>(size));
+    vkUnmapMemory(device, staging->memory);
 
     VkCommandBuffer cmd = beginSingleTimeCommands();
-    VkBufferCopy copyRegion{0,0,size};
-    vkCmdCopyBuffer(cmd, staging.buffer, dstBuf.buffer, 1, &copyRegion);
+    VkBufferCopy copyRegion{};
+    copyRegion.srcOffset = stagingOffset;
+    copyRegion.dstOffset = 0;
+    copyRegion.size = size;
+    vkCmdCopyBuffer(cmd, staging->buffer, dstBuf.buffer, 1, &copyRegion);
     endSingleTimeCommands(cmd);
 
-    vkDestroyBuffer(device, staging.buffer, nullptr);
-    vkFreeMemory(device, staging.memory, nullptr);
+    if (!usePersistent)
+        destroyBuffer(tempStaging);
 }
 
 void PENNIS::readbackFromDeviceBuffer(Buffer& srcBuf, void* dstMemory, VkDeviceSize size)
 {
-    Buffer staging;
-    createBuffer(size, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                 staging);
+    if (size == 0 || dstMemory == nullptr) return;
 
+    ensurePersistentStagingReadSize(size);
+
+    bool usePersistent = (stagingReadBuffer.buffer != VK_NULL_HANDLE) && (size <= stagingReadSize);
+
+    Buffer tempStaging{};
+    Buffer* staging = nullptr;
+    VkDeviceSize stagingOffset = 0;
+
+    if (usePersistent) {
+        staging = &stagingReadBuffer;
+    } else {
+        createBuffer(size,
+                     VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                     tempStaging);
+        staging = &tempStaging;
+    }
+
+    // Record and submit a copy command: srcBuf -> staging
     VkCommandBuffer cmd = beginSingleTimeCommands();
-    VkBufferCopy copyRegion{0,0,size};
-    vkCmdCopyBuffer(cmd, srcBuf.buffer, staging.buffer, 1, &copyRegion);
+    VkBufferCopy copyRegion{};
+    copyRegion.srcOffset = 0;
+    copyRegion.dstOffset = stagingOffset;
+    copyRegion.size = size;
+    vkCmdCopyBuffer(cmd, srcBuf.buffer, staging->buffer, 1, &copyRegion);
     endSingleTimeCommands(cmd);
 
-    void* data;
-    vkMapMemory(device, staging.memory, 0, size, 0, &data);
-    memcpy(dstMemory, data, (size_t)size);
-    vkUnmapMemory(device, staging.memory);
+    // Map staging memory and copy to user pointer
+    void* mapPtr = nullptr;
+    VkResult res = vkMapMemory(device, staging->memory, stagingOffset, size, 0, &mapPtr);
+    if (res != VK_SUCCESS || mapPtr == nullptr) {
+        if (!usePersistent) destroyBuffer(tempStaging);
+        throw std::runtime_error("vkMapMemory failed in readbackFromDeviceBuffer");
+    }
+    memcpy(dstMemory, mapPtr, static_cast<size_t>(size));
+    vkUnmapMemory(device, staging->memory);
 
-    vkDestroyBuffer(device, staging.buffer, nullptr);
-    vkFreeMemory(device, staging.memory, nullptr);
+    // Destroy the temp staging buffer if we created one
+    if (!usePersistent) {
+        destroyBuffer(tempStaging);
+    }
 }
 
 void PENNIS::shuffleAndUploadIndices()

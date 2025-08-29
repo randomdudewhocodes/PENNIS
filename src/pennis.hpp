@@ -113,6 +113,11 @@ private:
     uint32_t batchSize;
     std::vector<Layer> layers;
 
+    Buffer stagingUploadBuffer;
+    Buffer stagingReadBuffer;
+    VkDeviceSize stagingUploadSize = 0;
+    VkDeviceSize stagingReadSize = 0;
+
     Buffer trainingInputBuffer;
     Buffer trainingTargetBuffer;
     uint32_t datasetSize;
@@ -134,6 +139,10 @@ private:
     bool ff_includeInput = true;
     int ff_mappedDim = 0;
     std::vector<float> ff_B;
+    
+    void ensurePersistentStagingUploadSize(VkDeviceSize required);
+    void ensurePersistentStagingReadSize(VkDeviceSize required);
+    void createPersistentStagingBuffers(VkDeviceSize maxUploadBytes, VkDeviceSize maxReadBytes);
 
     void shuffleAndUploadIndices();
     void updateSamplerDescriptors();
